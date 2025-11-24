@@ -302,11 +302,8 @@ jobs:
 
       - name: Submit Gradle dependency graph
         if: steps.detect-gradle.outputs.is_gradle == 'true'
-        # uses: gradle/actions/dependency-submission@v3
-        uses: mikepenz/gradle-dependency-submission@v1.0.0
+        uses: gradle/actions/dependency-submission@v4
         with:
-          # This action automatically handles multi-module projects
-          # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
         env:
           # Only force SHA/REF for PRs. For Push, use default (which is correct).
