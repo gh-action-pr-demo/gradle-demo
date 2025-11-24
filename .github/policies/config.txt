@@ -1,0 +1,22 @@
+# Dependency Review Configuration
+# This file controls the severity levels for dependency scanning
+
+# Policy source: where to read policy files from
+# Options: local, github
+# - local: read from .github/policies/ in current repository
+# - github: read from remote GitHub repository (POLICY_REPO)
+policy_source: github
+
+# GitHub policy repository (only used when policy_source=github)
+# Format: owner/repo
+policy_repo: gh-action-pr-demo/config
+policy_ref: main
+policy_path: .github/policies
+
+# Minimum severity level for dependency-review-action to fail the build
+# Options: critical, high, moderate, low
+fail_on_severity: high
+
+# Minimum severity level for policy violations to be reported
+# Options: critical, high, moderate, low
+min_severity: high
