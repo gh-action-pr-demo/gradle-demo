@@ -300,6 +300,11 @@ jobs:
           # This action automatically handles multi-module projects
           # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
+        env:
+          # Force the action to use the PR head SHA and Ref
+          # This ensures the graph matches what dependency-review-action checks
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REF: ${{ github.event.pull_request.head.ref }}
 
       - name: Wait and Debug Dependency Graph
         if: steps.detect-gradle.outputs.is_gradle == 'true'
