@@ -305,6 +305,8 @@ jobs:
         uses: gradle/actions/dependency-submission@v4
         with:
           dependency-graph: generate-and-submit
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
         env:
           # Only force SHA/REF for PRs. For Push, use default (which is correct).
           GITHUB_SHA: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.sha || '' }}
