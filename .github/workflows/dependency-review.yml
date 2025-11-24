@@ -382,6 +382,7 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           # Explicitly check the PR HEAD commit where we submitted the graph
+          base-ref: ${{ github.event.pull_request.base.sha }}
           head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never
