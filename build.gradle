@@ -22,6 +22,9 @@ dependencies {
     
     // Fastjson 反序列化漏洞
     implementation 'com.alibaba:fastjson:1.2.80'
+
+    // 新增：Commons Collections 漏洞 (用于测试 PR 差异检测)
+    implementation 'commons-collections:commons-collections:3.2.1'
     
     // 其他常用依赖
     implementation 'com.google.guava:guava:30.1-jre'

@@ -301,6 +301,8 @@ jobs:
           # This action automatically handles multi-module projects
           # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
+          # Explicitly set correlator to ensure consistency
+          dependency-graph-job-correlator: '${{ github.workflow }}-${{ github.job }}'
 
       - name: Wait and Debug Dependency Graph
         if: steps.detect-gradle.outputs.is_gradle == 'true'
