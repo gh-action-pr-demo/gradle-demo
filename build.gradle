@@ -11,8 +11,17 @@ repositories {
 }
 
 dependencies {
-    // 使用一个有已知漏洞的老版本 log4j 用于演示
-    implementation 'org.apache.logging.log4j:log4j-core:2.10.1'
+    // 使用一个有已知漏洞的老版本 log4j 用于演示 (CVE-2021-44228)
+    implementation 'org.apache.logging.log4j:log4j-core:2.14.1'
+    
+    // Apache Commons Text 漏洞 (CVE-2022-42889 "Text4Shell")
+    implementation 'org.apache.commons:commons-text:1.9'
+    
+    // Jackson Databind 反序列化漏洞
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.10.0'
+    
+    // Fastjson 反序列化漏洞
+    implementation 'com.alibaba:fastjson:1.2.80'
     
     // 其他常用依赖
     implementation 'com.google.guava:guava:30.1-jre'

@@ -301,6 +301,32 @@ jobs:
           # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
 
+      - name: Wait and Debug Dependency Graph
+        if: steps.detect-gradle.outputs.is_gradle == 'true'
+        run: |
+          echo "Waiting for GitHub to process dependency submission..."
+          sleep 30
+          
+          echo "=== Debug: Checking Generated Dependency Graph Reports ==="
+          ls -R dependency-graph-reports || echo "Directory not found"
+          
+          echo "=== Debug: Report Content Preview ==="
+          # Find and cat the first json report
+          REPORT_FILE=$(find dependency-graph-reports -name "*.json" | head -n 1)
+          if [ -f "$REPORT_FILE" ]; then
+            echo "Found report: $REPORT_FILE"
+            # Print first 50 lines and grep for log4j
+            head -n 50 "$REPORT_FILE"
+            echo "..."
+            echo "Checking for log4j in report:"
+            grep -C 2 "log4j" "$REPORT_FILE" || echo "log4j NOT FOUND in report"
+          else
+            echo "No JSON report file found!"
+          fi
+          
+          echo "=== Debug: Gradle Dependencies Check ==="
+          ./gradlew dependencies --configuration runtimeClasspath | grep log4j || echo "log4j not found in gradle dependencies"
+
       - name: Ensure Empty Baseline Exists
         id: ensure-baseline
         if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
