@@ -314,17 +314,23 @@ jobs:
           REPORT_FILE=$(find dependency-graph-reports -name "*.json" | head -n 1)
           if [ -f "$REPORT_FILE" ]; then
             echo "Found report: $REPORT_FILE"
-            # Print first 50 lines and grep for log4j
-            head -n 50 "$REPORT_FILE"
-            echo "..."
-            echo "Checking for log4j in report:"
-            grep -C 2 "log4j" "$REPORT_FILE" || echo "log4j NOT FOUND in report"
+            echo "--- FULL REPORT CONTENT START ---"
+            cat "$REPORT_FILE"
+            echo "--- FULL REPORT CONTENT END ---"
+            
+            echo "Checking for key packages in report:"
+            echo "1. log4j:"
+            grep "log4j" "$REPORT_FILE" || echo "log4j NOT FOUND"
+            echo "2. commons-collections:"
+            grep "commons-collections" "$REPORT_FILE" || echo "commons-collections NOT FOUND"
+            echo "3. fastjson:"
+            grep "fastjson" "$REPORT_FILE" || echo "fastjson NOT FOUND"
           else
             echo "No JSON report file found!"
           fi
           
           echo "=== Debug: Gradle Dependencies Check ==="
-          ./gradlew dependencies --configuration runtimeClasspath | grep log4j || echo "log4j not found in gradle dependencies"
+          ./gradlew dependencies --configuration runtimeClasspath
 
       - name: Ensure Empty Baseline Exists
         id: ensure-baseline
