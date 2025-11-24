@@ -305,8 +305,6 @@ jobs:
         uses: gradle/actions/dependency-submission@v4
         with:
           dependency-graph: generate-and-submit
-          retry-on-snapshot-warnings: true
-          retry-on-snapshot-warnings-timeout: 600
         env:
           # Only force SHA/REF for PRs. For Push, use default (which is correct).
           GITHUB_SHA: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.sha || '' }}
@@ -395,6 +393,8 @@ jobs:
           head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
 
       - name: Dependency Review (Gradle - Fallback to Full Scan)
         id: dep-review-gradle-fallback
@@ -409,6 +409,8 @@ jobs:
           head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
 
       - name: Dependency Review (Non-Gradle)
         id: dep-review-other
