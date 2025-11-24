@@ -330,7 +330,9 @@ jobs:
 
       - name: Ensure Empty Baseline Exists
         id: ensure-baseline
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+        # Only use empty baseline for non-Gradle projects (e.g. Maven)
+        # Gradle projects use dependency submission which works better with standard PR comparison
+        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle != 'true'
         continue-on-error: true
         run: |
           BASELINE_BRANCH="dependency-review-baseline"
@@ -370,9 +372,10 @@ jobs:
         continue-on-error: true
         uses: actions/dependency-review-action@v4
         with:
-          # Use empty branch as base to force full scan
-          base-ref: dependency-review-baseline
-          head-ref: ${{ github.sha }}
+          # For non-Gradle projects, use empty branch as base to force full scan
+          # For Gradle projects, use default behavior (compare against PR base)
+          base-ref: ${{ steps.detect-gradle.outputs.is_gradle != 'true' && 'dependency-review-baseline' || '' }}
+          head-ref: ${{ steps.detect-gradle.outputs.is_gradle != 'true' && github.sha || '' }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never  # Disable default comment, use custom filter
 
