@@ -1,8 +1,6 @@
 name: Dependency Review
 
 on:
-  push:
-    branches: [ main, master ]
   pull_request:
     types: [opened, synchronize, reopened]
   issues:
@@ -368,26 +366,40 @@ jobs:
           
           echo "baseline_ref=$BASELINE_BRANCH" >> $GITHUB_OUTPUT
 
-      - name: Dependency Review
-        id: dep-review
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+      - name: Dependency Review (Gradle)
+        id: dep-review-gradle
+        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle == 'true'
+        continue-on-error: true
+        uses: actions/dependency-review-action@v4
+        with:
+          # For Gradle, we rely on the submitted dependency graph API
+          # Do NOT set base-ref/head-ref, let the action detect the PR context automatically
+          fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
+          comment-summary-in-pr: never
+
+      - name: Dependency Review (Non-Gradle)
+        id: dep-review-other
+        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle != 'true'
         continue-on-error: true
         uses: actions/dependency-review-action@v4
         with:
           # For non-Gradle projects, use empty branch as base to force full scan
-          # For Gradle projects, use default behavior (compare against PR base)
-          base-ref: ${{ steps.detect-gradle.outputs.is_gradle != 'true' && 'dependency-review-baseline' || '' }}
-          head-ref: ${{ steps.detect-gradle.outputs.is_gradle != 'true' && github.sha || '' }}
+          base-ref: dependency-review-baseline
+          head-ref: ${{ github.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
-          comment-summary-in-pr: never  # Disable default comment, use custom filter
+          comment-summary-in-pr: never
 
+      # Write vulnerable-changes to file (avoid shell parsing issues)
       # Write vulnerable-changes to file (avoid shell parsing issues)
       - name: Write vulnerable changes to file
         if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
         run: |
-          cat > /tmp/vulnerable-changes.json << 'VULNERABILITY_EOF'
-          ${{ steps.dep-review.outputs.vulnerable-changes }}
-          VULNERABILITY_EOF
+          # Determine which output to use
+          if [ "${{ steps.detect-gradle.outputs.is_gradle }}" == "true" ]; then
+            echo '${{ steps.dep-review-gradle.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
+          else
+            echo '${{ steps.dep-review-other.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
+          fi
 
       - name: Filter vulnerabilities by policy
         id: filter-vulns
