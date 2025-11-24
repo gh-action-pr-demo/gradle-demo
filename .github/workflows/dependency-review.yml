@@ -293,16 +293,20 @@ jobs:
         if: steps.detect-gradle.outputs.is_gradle == 'true'
         uses: gradle/actions/setup-gradle@v3
 
+      - name: Debug - Check build.gradle content
+        if: steps.detect-gradle.outputs.is_gradle == 'true'
+        run: |
+          echo "=== Current build.gradle content ==="
+          cat build.gradle
+          echo "=== End of build.gradle ==="
+
       - name: Submit Gradle dependency graph
         if: steps.detect-gradle.outputs.is_gradle == 'true'
-        uses: gradle/actions/dependency-submission@v3
+        uses: gradle/actions/dependency-submission@v4
         with:
-          # This action automatically handles multi-module projects
-          # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
         env:
-          # Force submission to associate with the PR HEAD commit
-          # This is critical for dependency-review to find the graph
+          # Only force SHA/REF for PRs. For Push, use default (which is correct).
           GITHUB_SHA: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.sha || '' }}
           GITHUB_REF: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.ref || '' }}
 
@@ -389,6 +393,8 @@ jobs:
           head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
 
       - name: Dependency Review (Gradle - Fallback to Full Scan)
         id: dep-review-gradle-fallback
@@ -403,6 +409,8 @@ jobs:
           head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
 
       - name: Dependency Review (Non-Gradle)
         id: dep-review-other
