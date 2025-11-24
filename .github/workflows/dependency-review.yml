@@ -372,6 +372,7 @@ jobs:
         with:
           # Use empty branch as base to force full scan
           base-ref: dependency-review-baseline
+          head-ref: ${{ github.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never  # Disable default comment, use custom filter
 
