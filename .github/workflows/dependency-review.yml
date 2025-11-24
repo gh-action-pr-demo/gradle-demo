@@ -299,6 +299,11 @@ jobs:
           # This action automatically handles multi-module projects
           # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
+        env:
+          # Force submission to associate with the PR HEAD commit
+          # This is critical for dependency-review to find the graph
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REF: ${{ github.event.pull_request.head.ref }}
 
       - name: Wait and Debug Dependency Graph
         if: steps.detect-gradle.outputs.is_gradle == 'true'
@@ -376,8 +381,8 @@ jobs:
         continue-on-error: true
         uses: actions/dependency-review-action@v4
         with:
-          # For Gradle, we rely on the submitted dependency graph API
-          # Do NOT set base-ref/head-ref, let the action detect the PR context automatically
+          # Explicitly check the PR HEAD commit where we submitted the graph
+          head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never
 
