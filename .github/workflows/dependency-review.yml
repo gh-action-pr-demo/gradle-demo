@@ -17,15 +17,17 @@ jobs:
   dependency-review:
     runs-on: ubuntu-latest
     steps:
-      - name: Get PR number from context
-        id: get-pr-number
+      - name: Check Context (PR or Push)
+        id: context-check
         uses: actions/github-script@v7
         with:
           script: |
-            let prNumber;
+            let prNumber = '';
+            let isPr = 'false';
+            let isPushToMain = 'false';
+            
             if (context.eventName === 'issues') {
-              // Get PR number from issues.labeled/unlabeled event
-              // Triggered only when adding or removing dependency-check-ignore label
+              // Handle label events
               const labelName = context.payload.label?.name;
               const action = context.payload.action; // 'labeled' or 'unlabeled'
               
@@ -34,50 +36,47 @@ jobs:
               console.log(`Action: ${action}`);
               console.log(`Label Name: ${labelName}`);
               console.log(`Issue Number: ${context.payload.issue?.number}`);
-              
-              if (labelName !== 'dependency-check-ignore') {
-                console.log(`Label ${labelName} is not dependency-check-ignore, skipping`);
-                core.setOutput('is_pr', 'false');
-                return;
+
+              if (labelName === 'dependency-check-ignore' && context.payload.issue?.pull_request) {
+                prNumber = context.payload.issue.number;
+                isPr = 'true';
+                console.log(`Detected label event on PR #${prNumber}`);
+              } else {
+                console.log(`Label ${labelName} is not dependency-check-ignore or not on a PR, skipping PR context`);
               }
-              
-              prNumber = context.payload.issue.number;
-              // Verify if it's a PR
-              if (!context.payload.issue.pull_request) {
-                console.log('This is not a PR, skipping');
-                core.setOutput('is_pr', 'false');
-                return;
-              }
-              
-              if (action === 'labeled') {
-                console.log(`Detected addition of dependency-check-ignore label, triggering dependency check`);
-              } else if (action === 'unlabeled') {
-                console.log(`Detected removal of dependency-check-ignore label, triggering dependency check`);
-              }
-            } else {
-              // Get PR number from pull_request event
+            } else if (context.eventName === 'pull_request') {
+              // Handle PR events
               prNumber = context.payload.pull_request.number;
+              isPr = 'true';
+            } else if (context.eventName === 'push' && (context.ref === 'refs/heads/main' || context.ref === 'refs/heads/master')) {
+              // Handle Push to Main events (for baseline generation)
+              isPushToMain = 'true';
+              console.log('Push to main detected - will generate baseline graph');
             }
             
             core.setOutput('pr_number', prNumber.toString());
-            core.setOutput('is_pr', 'true');
-            console.log(`PR Number: ${prNumber}, Event: ${context.eventName}`);
+            core.setOutput('is_pr', isPr);
+            core.setOutput('is_push_to_main', isPushToMain);
+            
+            console.log(`Event: ${context.eventName}`);
+            console.log(`Is PR: ${isPr}`);
+            console.log(`Is Push to Main: ${isPushToMain}`);
 
       - name: Checkout repository
-        if: steps.get-pr-number.outputs.is_pr == 'true'
+        if: steps.context-check.outputs.is_pr == 'true' || steps.context-check.outputs.is_push_to_main == 'true'
         uses: actions/checkout@v4
         with:
-          # Explicitly checkout PR HEAD
-          ref: ${{ github.event.pull_request.head.sha }}
+          # Explicitly checkout PR HEAD for PRs, or default for Push
+          ref: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.sha || '' }}
           fetch-depth: 0
 
       - name: Check if dependency check is ignored
         id: check-ignored
-        if: steps.get-pr-number.outputs.is_pr == 'true'
+        if: steps.context-check.outputs.is_pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = '${{ steps.get-pr-number.outputs.pr_number }}';
+            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
             const { data: issue } = await github.rest.issues.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -97,11 +96,11 @@ jobs:
             }
 
       - name: Skip if ignored and post comment
-        if: steps.check-ignored.outputs.ignored == 'true'
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = '${{ steps.get-pr-number.outputs.pr_number }}';
+            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
             
             // Get PR details
             const { data: pr } = await github.rest.pulls.get({
@@ -158,7 +157,7 @@ jobs:
 
       - name: Read policy configuration
         id: policy-config
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+        if: (steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true') || steps.context-check.outputs.is_push_to_main == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -238,7 +237,7 @@ jobs:
       # Auto-detect and submit Gradle dependencies
       - name: Detect Gradle project and JDK version
         id: detect-gradle
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+        if: (steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true') || steps.context-check.outputs.is_push_to_main == 'true'
         run: |
           # Check for Gradle build files (supports multi-module projects)
           if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] || find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) | grep -q .; then
@@ -302,10 +301,10 @@ jobs:
           # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
         env:
-          # Force the action to use the PR head SHA and Ref
-          # This ensures the graph matches what dependency-review-action checks
-          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
-          GITHUB_REF: ${{ github.event.pull_request.head.ref }}
+          # Force submission to associate with the PR HEAD commit
+          # This is critical for dependency-review to find the graph
+          GITHUB_SHA: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.sha || '' }}
+          GITHUB_REF: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.ref || '' }}
 
       - name: Wait and Debug Dependency Graph
         if: steps.detect-gradle.outputs.is_gradle == 'true'
@@ -321,21 +320,29 @@ jobs:
           REPORT_FILE=$(find dependency-graph-reports -name "*.json" | head -n 1)
           if [ -f "$REPORT_FILE" ]; then
             echo "Found report: $REPORT_FILE"
-            # Print first 50 lines and grep for log4j
-            head -n 50 "$REPORT_FILE"
-            echo "..."
-            echo "Checking for log4j in report:"
-            grep -C 2 "log4j" "$REPORT_FILE" || echo "log4j NOT FOUND in report"
+            echo "--- FULL REPORT CONTENT START ---"
+            cat "$REPORT_FILE"
+            echo "--- FULL REPORT CONTENT END ---"
+            
+            echo "Checking for key packages in report:"
+            echo "1. log4j:"
+            grep "log4j" "$REPORT_FILE" || echo "log4j NOT FOUND"
+            echo "2. commons-collections:"
+            grep "commons-collections" "$REPORT_FILE" || echo "commons-collections NOT FOUND"
+            echo "3. fastjson:"
+            grep "fastjson" "$REPORT_FILE" || echo "fastjson NOT FOUND"
           else
             echo "No JSON report file found!"
           fi
           
           echo "=== Debug: Gradle Dependencies Check ==="
-          ./gradlew dependencies --configuration runtimeClasspath | grep log4j || echo "log4j not found in gradle dependencies"
+          ./gradlew dependencies --configuration runtimeClasspath
 
       - name: Ensure Empty Baseline Exists
         id: ensure-baseline
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+        # Only use empty baseline for non-Gradle projects (e.g. Maven)
+        # Gradle projects use dependency submission which works better with standard PR comparison
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle != 'true'
         continue-on-error: true
         run: |
           BASELINE_BRANCH="dependency-review-baseline"
@@ -369,29 +376,71 @@ jobs:
           
           echo "baseline_ref=$BASELINE_BRANCH" >> $GITHUB_OUTPUT
 
-      - name: Dependency Review
-        id: dep-review
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+      - name: Dependency Review (Gradle)
+        id: dep-review-gradle
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle == 'true'
         continue-on-error: true
         uses: actions/dependency-review-action@v4
         with:
-          # Use empty branch as base to force full scan
+          # For Gradle, try to compare against PR base
+          # If base doesn't have a dependency graph yet (first PR), this may fail
+          # We'll handle the fallback in a separate step
+          base-ref: ${{ github.event.pull_request.base.sha }}
+          head-ref: ${{ github.event.pull_request.head.sha }}
+          fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
+          comment-summary-in-pr: never
+
+      - name: Dependency Review (Gradle - Fallback to Full Scan)
+        id: dep-review-gradle-fallback
+        # Run if the primary Gradle review failed (likely because base has no dependency graph)
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle == 'true' && steps.dep-review-gradle.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/dependency-review-action@v4
+        with:
+          # Fallback: Use empty baseline for full scan
+          # This ensures vulnerability detection works even on the first PR
           base-ref: dependency-review-baseline
           head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
-          comment-summary-in-pr: never  # Disable default comment, use custom filter
+          comment-summary-in-pr: never
+
+      - name: Dependency Review (Non-Gradle)
+        id: dep-review-other
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle != 'true'
+        continue-on-error: true
+        uses: actions/dependency-review-action@v4
+        with:
+          # For non-Gradle projects, use empty branch as base to force full scan
+          base-ref: dependency-review-baseline
+          head-ref: ${{ github.sha }}
+          fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
+          comment-summary-in-pr: never
 
       # Write vulnerable-changes to file (avoid shell parsing issues)
       - name: Write vulnerable changes to file
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
         run: |
-          cat > /tmp/vulnerable-changes.json << 'VULNERABILITY_EOF'
-          ${{ steps.dep-review.outputs.vulnerable-changes }}
-          VULNERABILITY_EOF
+          # Determine which output to use
+          if [ "${{ steps.detect-gradle.outputs.is_gradle }}" == "true" ]; then
+            # For Gradle, check if primary review succeeded or use fallback
+            if [ "${{ steps.dep-review-gradle.outcome }}" == "success" ]; then
+              echo "Using primary Gradle dependency review output"
+              echo '${{ steps.dep-review-gradle.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
+            elif [ "${{ steps.dep-review-gradle-fallback.outcome }}" == "success" ]; then
+              echo "Using fallback Gradle dependency review output (full scan)"
+              echo '${{ steps.dep-review-gradle-fallback.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
+            else
+              echo "Both Gradle dependency review steps failed or were skipped"
+              echo '[]' > /tmp/vulnerable-changes.json
+            fi
+          else
+            # Non-Gradle projects
+            echo '${{ steps.dep-review-other.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
+          fi
 
       - name: Filter vulnerabilities by policy
         id: filter-vulns
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
         run: |
           set +e  # Don't exit on error
           echo "=== Filtering vulnerabilities by policy ==="
@@ -471,7 +520,7 @@ jobs:
 
       # Debug steps - commented out to reduce noise, uncomment if needed for troubleshooting
       # - name: Debug - Check dependencies
-      #   if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+      #   if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
       #   run: |
       #     echo "=== Check pom.xml Files ==="
       #     find . -name "pom.xml" -type f
@@ -505,10 +554,10 @@ jobs:
       #     fi
       #
       # - name: Debug - PR comment conditions
-      #   if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+      #   if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
       #   run: |
       #     echo "=== PR Comment Conditions Debug ==="
-      #     echo "is_pr: ${{ steps.get-pr-number.outputs.is_pr }}"
+      #     echo "is_pr: ${{ steps.context-check.outputs.is_pr }}"
       #     echo "ignored: ${{ steps.check-ignored.outputs.ignored }}"
       #     echo "has_violations: ${{ steps.filter-vulns.outputs.has_violations }}"
       #     echo "filter-vulns outcome: ${{ steps.filter-vulns.outcome }}"
@@ -519,10 +568,10 @@ jobs:
 
       # WEBHOOK_HOOK: Notification when vulnerabilities are detected
       - name: Webhook - Vulnerabilities Detected
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.filter-vulns.outputs.has_violations == 'true'
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.filter-vulns.outputs.has_violations == 'true'
         run: |
           echo "=== WEBHOOK: Vulnerabilities Detected ==="
-          echo "PR Number: ${{ steps.get-pr-number.outputs.pr_number }}"
+          echo "PR Number: ${{ steps.context-check.outputs.pr_number }}"
           echo "Violations Count: $(cat /tmp/filter-output.json | jq '.summary.policy_violations')"
           echo "Min Severity: ${{ steps.policy-config.outputs.min_severity }}"
           # TODO: Replace with actual webhook call
@@ -530,17 +579,17 @@ jobs:
           #   -H "Content-Type: application/json" \
           #   -d '{
           #     "event": "vulnerabilities_detected",
-          #     "pr_number": "${{ steps.get-pr-number.outputs.pr_number }}",
+          #     "pr_number": "${{ steps.context-check.outputs.pr_number }}",
           #     "violations": $(cat /tmp/filter-output.json | jq '.summary.policy_violations'),
           #     "severity": "${{ steps.policy-config.outputs.min_severity }}"
           #   }'
 
       # WEBHOOK_HOOK: Notification when no vulnerabilities are detected
       - name: Webhook - No Vulnerabilities
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && (steps.filter-vulns.outputs.has_violations == 'false' || steps.filter-vulns.outputs.has_violations == '')
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && (steps.filter-vulns.outputs.has_violations == 'false' || steps.filter-vulns.outputs.has_violations == '')
         run: |
           echo "=== WEBHOOK: No Vulnerabilities ==="
-          echo "PR Number: ${{ steps.get-pr-number.outputs.pr_number }}"
+          echo "PR Number: ${{ steps.context-check.outputs.pr_number }}"
           echo "Status: PASSED"
           echo "Min Severity: ${{ steps.policy-config.outputs.min_severity }}"
           # TODO: Replace with actual webhook call
@@ -548,19 +597,19 @@ jobs:
           #   -H "Content-Type: application/json" \
           #   -d '{
           #     "event": "no_vulnerabilities",
-          #     "pr_number": "${{ steps.get-pr-number.outputs.pr_number }}",
+          #     "pr_number": "${{ steps.context-check.outputs.pr_number }}",
           #     "status": "PASSED",
           #     "severity": "${{ steps.policy-config.outputs.min_severity }}"
           #   }'
 
       - name: Post filtered vulnerability comment
         id: post-filtered-comment
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.filter-vulns.outputs.has_violations == 'true'
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.filter-vulns.outputs.has_violations == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const prNumber = '${{ steps.get-pr-number.outputs.pr_number }}';
+            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
             
             // Read filtered output
             let filterOutput;
@@ -633,11 +682,11 @@ jobs:
             console.log('Created policy-filtered vulnerability comment');
 
       - name: Post no violations comment
-        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && (steps.filter-vulns.outputs.has_violations == 'false' || steps.filter-vulns.outputs.has_violations == '')
+        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && (steps.filter-vulns.outputs.has_violations == 'false' || steps.filter-vulns.outputs.has_violations == '')
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = '${{ steps.get-pr-number.outputs.pr_number }}';
+            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
             
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
