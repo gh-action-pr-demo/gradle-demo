@@ -67,6 +67,8 @@ jobs:
         if: steps.get-pr-number.outputs.is_pr == 'true'
         uses: actions/checkout@v4
         with:
+          # Explicitly checkout PR HEAD
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Check if dependency check is ignored
@@ -299,6 +301,11 @@ jobs:
           # This action automatically handles multi-module projects
           # It will discover all build.gradle files recursively
           dependency-graph: generate-and-submit
+        env:
+          # Force the action to use the PR head SHA and Ref
+          # This ensures the graph matches what dependency-review-action checks
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REF: ${{ github.event.pull_request.head.ref }}
 
       - name: Wait and Debug Dependency Graph
         if: steps.detect-gradle.outputs.is_gradle == 'true'
@@ -370,6 +377,7 @@ jobs:
         with:
           # Use empty branch as base to force full scan
           base-ref: dependency-review-baseline
+          head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
           comment-summary-in-pr: never  # Disable default comment, use custom filter
 
