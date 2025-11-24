@@ -9,7 +9,7 @@ on:
     types: [labeled, unlabeled]
 
 permissions:
-  contents: read
+  contents: write  # Required for dependency-submission
   pull-requests: write
   security-events: write
   checks: write
