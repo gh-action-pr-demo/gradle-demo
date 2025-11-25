@@ -380,8 +380,8 @@ jobs:
             VULN_FILE="vuln-changes.json"
           fi
 
-          MD_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/vuln-table-XXXXXX.md")
-          MARKDOWN_FILE=$(python3 .github/scripts/grype_vuln_to_md.py --input "$VULN_FILE" --output "$MD_OUTPUT" && echo "$MD_OUTPUT")
+          MARKDOWN_FILE=$(mktemp "${TMPDIR:-/tmp}/vuln-table-XXXXXX.md")
+          python3 .github/scripts/grype_vuln_to_md.py --input "$VULN_FILE" --output "$MARKDOWN_FILE"
           COMMENT_FILE=$(mktemp "${TMPDIR:-/tmp}/vuln-comment-XXXXXX.md")
 
           echo "table_file=$MARKDOWN_FILE" >> "$GITHUB_OUTPUT"
