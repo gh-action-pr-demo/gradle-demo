@@ -368,22 +368,22 @@ jobs:
       #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_maven == 'true'
       #   run: mvn -B clean package
 
-      # - name: Install project dependencies (npm)
-        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_npm == 'true'
-        run: |
-          set -euo pipefail
+      #  - name: Install project dependencies (npm)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_npm == 'true'
+      #   run: |
+      #     set -euo pipefail
 
-          NPM_DIRS="${{ steps.detect-ecosystem.outputs.npm_dirs }}"
-          if [ -z "$NPM_DIRS" ]; then
-            echo "No npm directories detected (unexpected)."
-            exit 0
-          fi
+      #     NPM_DIRS="${{ steps.detect-ecosystem.outputs.npm_dirs }}"
+      #     if [ -z "$NPM_DIRS" ]; then
+      #       echo "No npm directories detected (unexpected)."
+      #       exit 0
+      #     fi
 
-          while IFS= read -r dir; do
-            [ -z "$dir" ] && continue
-            echo "[npm] Installing dependencies in ${dir}"
-            (cd "$dir" && npm ci)
-          done <<< "$NPM_DIRS"
+      #     while IFS= read -r dir; do
+      #       [ -z "$dir" ] && continue
+      #       echo "[npm] Installing dependencies in ${dir}"
+      #       (cd "$dir" && npm ci)
+      #     done <<< "$NPM_DIRS"
 
       # - name: Install project dependencies (Yarn)
       #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_yarn == 'true'
