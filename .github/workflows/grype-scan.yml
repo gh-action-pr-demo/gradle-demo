@@ -88,103 +88,9 @@ jobs:
         if: always()
         env:
           FAIL_ON_SEVERITY: ${{ env.GRYPE_FAIL_ON_SEVERITY }}
-        run: |
-          python <<'PY'
-            import json
-            import os
-            from collections import defaultdict
-
-            report_path = "grype-report.json"
-            summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-            fail_on = os.environ.get("FAIL_ON_SEVERITY", "high").capitalize()
-            sha = os.environ.get("GITHUB_SHA", "")[:7]
-            severity_order = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"]
-            severity_rank = {name: idx for idx, name in enumerate(severity_order)}
-
-            if os.path.exists(report_path) and os.path.getsize(report_path) > 0:
-                with open(report_path, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                matches = data.get("matches", [])
-            else:
-                matches = []
-
-            counts = defaultdict(int)
-            packages = {}
-            for match in matches:
-                vuln = match.get("vulnerability", {})
-                artifact = match.get("artifact", {})
-                severity = (vuln.get("severity") or "Unknown").capitalize()
-                counts[severity] += 1
-                pkg = artifact.get("name", "unknown")
-                version = artifact.get("version", "unknown")
-                key = f"{pkg}@{version}"
-                entry = packages.setdefault(
-                    key,
-                    {"name": pkg, "version": version, "severities": set(), "ids": set()},
-                )
-                entry["severities"].add(severity)
-                vuln_id = vuln.get("id") or vuln.get("dataSource") or "N/A"
-                entry["ids"].add(vuln_id)
-
-            def entry_score(item):
-                severities = item["severities"] or {"Unknown"}
-                return min(severity_rank.get(sev, len(severity_order)) for sev in severities)
-
-            top_packages = sorted(
-                packages.values(),
-                key=lambda item: (entry_score(item), -len(item["ids"]))
-            )[:5]
-
-            def format_severities(values):
-                return ", ".join(
-                    sorted(values, key=lambda s: severity_rank.get(s, len(severity_order)))
-                )
-
-            def format_ids(values):
-                return "<br>".join(sorted(values)) if values else "-"
-
-            summary_lines = [
-                "## Grype 扫描摘要",
-                f"- 触发提交：`{sha}`",
-                f"- 失败阈值：{fail_on} 及以上",
-                f"- 总匹配漏洞数：{len(matches)}",
-            ]
-
-            comment_lines = summary_lines.copy()
-
-            if matches:
-                summary_lines.append("")
-                summary_lines.append("### 严重等级分布")
-                for sev in severity_order:
-                    if counts.get(sev):
-                        summary_lines.append(f"- {sev}: {counts[sev]}")
-
-                comment_lines.append("")
-                comment_lines.append("### 📦 高优先级依赖（最多 5 个）")
-                comment_lines.append("| 依赖 | 版本 | 严重等级 | 漏洞 ID |")
-                comment_lines.append("| ---- | ---- | -------- | ------- |")
-                for pkg in top_packages:
-                    comment_lines.append(
-                        f"| `{pkg['name']}` | `{pkg['version']}` | {format_severities(pkg['severities'])} | {format_ids(pkg['ids'])} |"
-                    )
-            else:
-                comment_lines.append("")
-                comment_lines.append("✅ 未检测到达到阈值的漏洞。")
-
-            comment_body = "\n".join(comment_lines) + "\n"
-
-            with open("grype-comment.md", "w", encoding="utf-8") as fh:
-                fh.write(comment_body)
-
-            if summary_path:
-                with open(summary_path, "a", encoding="utf-8") as fh:
-                    fh.write("\n".join(summary_lines))
-                    fh.write("\n")
-
-            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-                fh.write(f"has_vulns={'true' if matches else 'false'}\n")
-                fh.write("comment_path=grype-comment.md\n")
-          PY
+          GRYPE_COMMENT_PATH: grype-comment.md
+          GRYPE_REPORT_PATH: grype-report.json
+        run: python3 .github/scripts/grype_summary.py
 
       - name: Comment PR with Grype results
         if: github.event_name == 'pull_request' && steps.format-report.outputs.comment_path != ''
@@ -192,9 +98,10 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const commentPath = '${{ steps.format-report.outputs.comment_path }}';
             let body = 'Grype 扫描已完成，但未能生成报告。';
             try {
-              body = fs.readFileSync('grype-comment.md', 'utf8');
+              body = fs.readFileSync(commentPath, 'utf8');
             } catch (error) {
               core.warning(`读取 Grype 评论文件失败: ${error.message}`);
             }
