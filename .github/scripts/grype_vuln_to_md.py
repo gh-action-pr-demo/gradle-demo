@@ -113,7 +113,7 @@ def to_markdown(entries: List[Dict[str, Any]]) -> List[str]:
 
     for row in group_entries(entries):
         vuln_cell = "<br>".join(
-            f"{severity_badge(vuln.get('severity'))} `{vuln.get('id')}`"
+            f"{severity_badge(vuln.get('severity'))} {vuln.get('id')}"
             for vuln in row["vulns"]
         )
         versions = ", ".join(row["versions"]) if row["versions"] else "(unknown)"
