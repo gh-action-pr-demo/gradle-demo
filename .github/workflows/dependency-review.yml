@@ -149,20 +149,139 @@ jobs:
           echo "::endgroup::"
 
       # ============================================
-      # Prepare build artifacts (brings real deps into workspace)
+      # Detect ecosystem + prepare runtimes/artifacts
       # ============================================
-      - name: Set up JDK
+      - name: Detect project ecosystem
+        id: detect-ecosystem
         if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          set -euo pipefail
+
+          ECOSYSTEM="unknown"
+          NEEDS_JAVA="false"
+          NEEDS_NODE="false"
+          NEEDS_PYTHON="false"
+          NEEDS_GO="false"
+          ARTIFACT_HINT=""
+
+          if [ -f "gradlew" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            ECOSYSTEM="gradle"
+            NEEDS_JAVA="true"
+            ARTIFACT_HINT="build/install"
+          elif [ -f "pom.xml" ]; then
+            ECOSYSTEM="maven"
+            NEEDS_JAVA="true"
+            ARTIFACT_HINT="target"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            ECOSYSTEM="pnpm"
+            NEEDS_NODE="true"
+            ARTIFACT_HINT="node_modules"
+          elif [ -f "yarn.lock" ]; then
+            ECOSYSTEM="yarn"
+            NEEDS_NODE="true"
+            ARTIFACT_HINT="node_modules"
+          elif [ -f "package-lock.json" ] || [ -f "package.json" ]; then
+            ECOSYSTEM="npm"
+            NEEDS_NODE="true"
+            ARTIFACT_HINT="node_modules"
+          elif [ -f "poetry.lock" ]; then
+            ECOSYSTEM="poetry"
+            NEEDS_PYTHON="true"
+            ARTIFACT_HINT=".venv"
+          elif [ -f "requirements.txt" ]; then
+            ECOSYSTEM="pip"
+            NEEDS_PYTHON="true"
+            ARTIFACT_HINT="build/python-deps"
+          elif [ -f "go.mod" ]; then
+            ECOSYSTEM="go"
+            NEEDS_GO="true"
+            ARTIFACT_HINT="bin"
+          fi
+
+          echo "[detect] ecosystem=$ECOSYSTEM, artifact_hint=${ARTIFACT_HINT:-"(none)"}"
+
+          {
+            echo "ecosystem=$ECOSYSTEM"
+            echo "needs_java=$NEEDS_JAVA"
+            echo "needs_node=$NEEDS_NODE"
+            echo "needs_python=$NEEDS_PYTHON"
+            echo "needs_go=$NEEDS_GO"
+            echo "artifact_hint=$ARTIFACT_HINT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_java == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Build application (includes dependencies)
-        if: steps.check-ignored.outputs.ignored != 'true'
+      - name: Set up Node.js
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_node == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_python == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Go
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Ensure Gradle wrapper permissions
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'gradle'
+        run: chmod +x ./gradlew
+
+      - name: Build project artifacts (Gradle)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'gradle'
+        uses: gradle/gradle-build-action@v2
+        with:
+          arguments: clean build installDist --stacktrace
+
+      - name: Build project artifacts (Maven)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'maven'
+        run: mvn -B clean package
+
+      - name: Install project dependencies (npm)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'npm'
+        run: npm ci
+
+      - name: Install project dependencies (Yarn)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'yarn'
         run: |
-          chmod +x ./gradlew
-          ./gradlew clean build installDist --stacktrace
+          corepack enable
+          yarn install --frozen-lockfile
+
+      - name: Install project dependencies (pnpm)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'pnpm'
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Install project dependencies (pip)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'pip'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -t build/python-deps
+
+      - name: Install project dependencies (Poetry)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'poetry'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install poetry
+          poetry install --no-interaction --no-root
+
+      - name: Build project artifacts (Go)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'go'
+        run: |
+          go mod download
+          go build ./...
 
       - name: Detect dependency payload directories
         id: syft-targets
@@ -178,6 +297,11 @@ jobs:
               TARGETS+=("$path")
             fi
           }
+
+          HINT="${{ steps.detect-ecosystem.outputs.artifact_hint }}"
+          if [ -n "$HINT" ]; then
+            add_if_exists "$HINT"
+          fi
 
           add_if_exists "build/install"
           add_if_exists "build/libs"
@@ -296,17 +420,13 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         if: steps.check-ignored.outputs.ignored != 'true'
         run: |
-          IFS=',' read -r -a TARGET_ARRAY <<< "${{ steps.syft-targets.outputs.targets }}"
-          if [ ${#TARGET_ARRAY[@]} -eq 0 ]; then
-            TARGET_ARRAY=(".")
+          PRIMARY="${{ steps.syft-targets.outputs.primary }}"
+          if [ -z "$PRIMARY" ]; then
+            PRIMARY="."
           fi
 
-          INPUTS=()
-          for path in "${TARGET_ARRAY[@]}"; do
-            INPUTS+=("dir:$path")
-          done
-
-          syft "${INPUTS[@]}" -o cyclonedx-json > sbom.json
+          echo "[syft] Generating SBOM from $PRIMARY"
+          syft "dir:$PRIMARY" -o cyclonedx-json > sbom.json
 
       # ============================================
       # Run Grype scan
