@@ -3,8 +3,6 @@ name: Dependency Review (SBOM + Grype Enhanced)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  pull_request_target:
-    types: [opened, synchronize, reopened]
   issues:
     types: [labeled, unlabeled]
 
@@ -13,6 +11,7 @@ permissions:
   pull-requests: write
   security-events: write
   checks: write
+  issues: read
 
 jobs:
   dependency-review:
@@ -150,6 +149,59 @@ jobs:
           echo "::endgroup::"
 
       # ============================================
+      # Prepare build artifacts (brings real deps into workspace)
+      # ============================================
+      - name: Set up JDK
+        if: steps.check-ignored.outputs.ignored != 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build application (includes dependencies)
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean build installDist --stacktrace
+
+      - name: Detect dependency payload directories
+        id: syft-targets
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          set -euo pipefail
+
+          declare -a TARGETS=()
+
+          add_if_exists() {
+            local path="$1"
+            if [ -d "$path" ]; then
+              TARGETS+=("$path")
+            fi
+          }
+
+          add_if_exists "build/install"
+          add_if_exists "build/libs"
+          add_if_exists "build/distributions"
+          add_if_exists "build"
+          add_if_exists "target"
+          add_if_exists "node_modules"
+          add_if_exists "dist"
+          add_if_exists "lib"
+          add_if_exists "vendor"
+          add_if_exists ".venv"
+          add_if_exists "venv"
+          add_if_exists "env"
+
+          if [ ${#TARGETS[@]} -eq 0 ]; then
+            TARGETS+=(".")
+          fi
+
+          PRIMARY="${TARGETS[0]}"
+          echo "[syft] Targets: ${TARGETS[*]}"
+          echo "primary=$PRIMARY" >> "$GITHUB_OUTPUT"
+          echo "targets=$(IFS=','; echo "${TARGETS[*]}")" >> "$GITHUB_OUTPUT"
+
+      # ============================================
       # Install tools (Syft + Grype)
       # ============================================
       - name: Install Syft
@@ -244,7 +296,17 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         if: steps.check-ignored.outputs.ignored != 'true'
         run: |
-          syft . -o cyclonedx-json > sbom.json
+          IFS=',' read -r -a TARGET_ARRAY <<< "${{ steps.syft-targets.outputs.targets }}"
+          if [ ${#TARGET_ARRAY[@]} -eq 0 ]; then
+            TARGET_ARRAY=(".")
+          fi
+
+          INPUTS=()
+          for path in "${TARGET_ARRAY[@]}"; do
+            INPUTS+=("dir:$path")
+          done
+
+          syft "${INPUTS[@]}" -o cyclonedx-json > sbom.json
 
       # ============================================
       # Run Grype scan
