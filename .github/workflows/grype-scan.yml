@@ -49,16 +49,19 @@ jobs:
           format: cyclonedx-json
           output-file: sbom.cdx.json
 
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | \
+            sh -s -- -b /usr/local/bin
+
       - name: Run Grype scan
         id: grype
-        uses: anchore/grype-action@v1
-        with:
-          scan-type: sbom
-          sbom: sbom.cdx.json
-          fail-on-severity: high
-          add-cpes-if-none: true
-          output-format: json
-          output-file: grype-report.json
+        run: |
+          grype sbom:sbom.cdx.json \
+            --fail-on high \
+            --add-cpes-if-none \
+            -o json \
+            > grype-report.json
 
       - name: Upload SBOM and Grype report
         if: always()
