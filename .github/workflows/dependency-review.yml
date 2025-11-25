@@ -242,7 +242,7 @@ jobs:
         if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'gradle'
         uses: gradle/gradle-build-action@v2
         with:
-          arguments: dependencies --write-locks
+          arguments: clean build installDist --stacktrace
 
       # - name: Build project artifacts (Maven)
       #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'maven'
