@@ -18,17 +18,14 @@ Grype 是 Anchore 维护的开源漏洞扫描器，支持扫描容器镜像、�
 1. **构建上下文**：使用 Temurin JDK 17 与 `gradle/actions/setup-gradle@v3`，执行 `./gradlew clean build`，保证依赖被解析并写入 `build/`.
 2. **SBOM 生成**：通过 `anchore/sbom-action@v0`（底层是 Syft）生成 `sbom.cdx.json`。
 3. **数据库缓存**：`actions/cache@v4` 缓存 `~/.cache/grype/db`，减少重复下载。
-4. **Grype 扫描**：`anchore/grype-action@v1` 对 SBOM 执行扫描，`fail-on-severity: high`，若出现 High/Critical 漏洞即让工作流失败。
-5. **结果产出**：SBOM 与 `grype-report.json` 通过 `actions/upload-artifact@v4` 上传，并在步骤摘要中提示下载路径。
+4. **Grype 扫描**：在 Runner 内安装 Grype CLI 并执行 `grype sbom:sbom.cdx.json --fail-on $GRYPE_FAIL_ON_SEVERITY --add-cpes-if-none -o json`，默认阈值 `high`（可通过环境变量 `GRYPE_FAIL_ON_SEVERITY` 配置）。命中阈值时返回码为 2，但工作流会继续生成报告与评论。
+5. **结果产出**：一方面仍可上传 SBOM 与 JSON 报告供离线分析；另一方面，Python 汇总脚本会把严重等级分布与 Top 依赖写入 Step Summary，并在 PR 中自动发表评论，做到“无需下载 artifact 也能查看结果”。
 
-如需调整严重级别或扫描方式，可编辑工作流中的以下字段：
+如需调整严重级别或扫描方式，可修改以下位置：
 
-```yaml
-with:
-  scan-type: sbom          # 可改为 dir
-  sbom: sbom.cdx.json      # 改为需要扫描的路径
-  fail-on-severity: high   # 可改为 critical / medium / low / negligible
-```
+- `GRYPE_FAIL_ON_SEVERITY` 环境变量：控制 `--fail-on` 的级别（critical / high / medium / low / negligible / none）。
+- `anchore/sbom-action@v0` 的 `path`/`format`/`output-file`，或直接改为其它 SBOM 生成方式。
+- 如果希望 Grype 直接扫描目录，可把命令替换为 `grype dir:build/libs ...` 并同步更新评论脚本使用的输入路径。
 
 若需要离线数据库，可在 Runner 预先挂载更新好的 DB，或把 `GRYPE_DB_CACHE_DIR` 指向共享卷。
 
@@ -67,9 +64,10 @@ with:
 
 | 场景 | 处理方式 |
 | ---- | -------- |
-| 需要不同阈值 | 修改工作流中的 `fail-on-severity` |
+| 需要不同阈值 | 修改 `GRYPE_FAIL_ON_SEVERITY` （示例：`critical`） |
 | 网络受限 | 预热 `~/.cache/grype/db`，并在 `actions/cache` 中共享 |
 | 只想扫描特定模块 | 调整 SBOM 生成命令或直接扫描目标目录 |
+| 不想重复评论 | 在 GitHub Script 中查找历史评论并更新（可后续扩展） |
 
 如需进一步定制（例如把报告转成 SARIF、推送到 Security tab），可在 Grype 步骤后增加 `github/codeql-action/upload-sarif`。
 

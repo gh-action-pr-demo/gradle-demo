@@ -65,6 +65,7 @@ gradle-demo/
 - 流程：构建 → Syft 生成 CycloneDX SBOM → Grype 扫描 → 上传 SBOM/报告。
 - 默认阈值：遇到 High 及以上漏洞即失败。
 - 默认缓存：`~/.cache/grype/db`，减少数据库下载时间。
+- 结果输出：无需下载 artifact，也会在 Workflow Summary 与 PR 评论里展示严重等级分布及 Top 依赖。
 - 适用场景：需要对整个工作区做全量漏洞扫描，即便 baseline 未提交依赖图也可工作。
 
 > 详尽说明（含本地运行示例）见 `docs/security.md`。
