@@ -16,13 +16,19 @@ const path = require('path');
 const https = require('https');
 
 // Configuration
+const policyPathEnv = process.env.POLICY_PATH || '.github/policies';
+const localPolicyEnv = process.env.LOCAL_POLICY_DIR || policyPathEnv;
+const resolvedLocalPolicyDir = path.isAbsolute(localPolicyEnv)
+        ? localPolicyEnv
+        : path.resolve(process.cwd(), localPolicyEnv);
+
 const CONFIG = {
         policySource: process.env.POLICY_SOURCE || 'local', // 'local' or 'github'
         policyRepo: process.env.POLICY_REPO || '', // e.g., 'your-org/dependency-policies'
-        policyPath: process.env.POLICY_PATH || '.github/policies', // path in repo
+        policyPath: policyPathEnv, // path in repo
         policyRef: process.env.POLICY_REF || 'main',
         minSeverity: process.env.MIN_SEVERITY || 'critical', // critical, high, moderate, low
-        localPolicyDir: path.join(__dirname, '../policies'),
+        localPolicyDir: resolvedLocalPolicyDir,
 };
 
 // Severity levels (higher number = more severe)
@@ -234,6 +240,16 @@ function filterVulnerabilities(vulnerableChanges, policies) {
  */
 async function main() {
         try {
+                console.error('=== Policy Filter Configuration ===');
+                console.error(`Source           : ${CONFIG.policySource}`);
+                if (CONFIG.policySource === 'github') {
+                        console.error(`Repo/Ref/Path    : ${CONFIG.policyRepo} @ ${CONFIG.policyRef} (${CONFIG.policyPath})`);
+                } else {
+                        console.error(`Local Directory   : ${CONFIG.localPolicyDir}`);
+                }
+                console.error(`Min Severity      : ${CONFIG.minSeverity}`);
+                console.error('===================================');
+
                 // Load policies
                 console.error('Loading policies...');
                 const policies = await loadPolicies();

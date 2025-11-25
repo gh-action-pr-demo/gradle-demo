@@ -1,0 +1,444 @@
+name: Dependency Review (SBOM + Grype Enhanced)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issues:
+    types: [labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  checks: write
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ============================================
+      # Determine PR number (retain your logic)
+      # ============================================
+      - name: Get PR number from context
+        id: get-pr-number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prNumber;
+            if (context.eventName === 'issues') {
+              const labelName = context.payload.label?.name;
+              if (labelName !== 'dependency-check-ignore') {
+                core.setOutput('is_pr', 'false');
+                return;
+              }
+              prNumber = context.payload.issue.number;
+              if (!context.payload.issue.pull_request) {
+                core.setOutput('is_pr', 'false');
+                return;
+              }
+            } else {
+              prNumber = context.payload.pull_request.number;
+            }
+            core.setOutput('pr_number', prNumber.toString());
+            core.setOutput('is_pr', 'true');
+
+      # ============================================
+      # Checkout
+      # ============================================
+      - name: Checkout
+        if: steps.get-pr-number.outputs.is_pr == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ============================================
+      # Check ignore label (retain your logic)
+      # ============================================
+      - name: Check if dependency check is ignored
+        id: check-ignored
+        if: steps.get-pr-number.outputs.is_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = parseInt('${{ steps.get-pr-number.outputs.pr_number }}', 10);
+            const issue = (await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            })).data;
+
+            const labels = issue.labels.map(l => l.name);
+            const ignored = labels.includes('dependency-check-ignore');
+            core.setOutput('ignored', ignored.toString());
+
+      # ============================================
+      # Read policy (retain your logic)
+      # ============================================
+      - name: Read policy configuration
+        id: policy-config
+        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONFIG_SOURCE=""
+          CONFIG_FILE="/tmp/policy.txt"
+          REMOTE="https://raw.githubusercontent.com/gh-action-pr-demo/config/main/.github/policies/config.txt"
+
+          if curl -fsSL -H "Authorization: token $GITHUB_TOKEN" "$REMOTE" > "$CONFIG_FILE"; then
+            CONFIG_SOURCE="remote"
+          elif [ -f ".github/policies/config.txt" ]; then
+            cp .github/policies/config.txt "$CONFIG_FILE"
+            CONFIG_SOURCE="local"
+          else
+            CONFIG_SOURCE="default"
+          fi
+
+          # Helper to read config values (returns empty string if missing)
+          read_config_value() {
+            local key="$1"
+            local default="$2"
+            local value
+            value=$(grep "^${key}:" "$CONFIG_FILE" | head -n1 | cut -d: -f2- | tr -d '[:space:]')
+            if [ -z "$value" ]; then
+              echo "$default"
+            else
+              echo "$value"
+            fi
+          }
+
+          if [ "$CONFIG_SOURCE" != "default" ]; then
+            FAIL=$(read_config_value "fail_on_severity" "high")
+            MIN=$(read_config_value "min_severity" "critical")
+            POLICY_SOURCE=$(read_config_value "policy_source" "local")
+            POLICY_REPO=$(read_config_value "policy_repo" "")
+            POLICY_REF=$(read_config_value "policy_ref" "main")
+            POLICY_PATH=$(read_config_value "policy_path" ".github/policies")
+          else
+            FAIL="high"
+            MIN="critical"
+            POLICY_SOURCE="local"
+            POLICY_REPO=""
+            POLICY_REF="main"
+            POLICY_PATH=".github/policies"
+          fi
+
+          echo "fail_on_severity=$FAIL" >> $GITHUB_OUTPUT
+          echo "min_severity=$MIN" >> $GITHUB_OUTPUT
+          echo "policy_source=$POLICY_SOURCE" >> $GITHUB_OUTPUT
+          echo "policy_repo=$POLICY_REPO" >> $GITHUB_OUTPUT
+          echo "policy_ref=$POLICY_REF" >> $GITHUB_OUTPUT
+          echo "policy_path=$POLICY_PATH" >> $GITHUB_OUTPUT
+
+          echo "::group::Policy Debug Details"
+          echo "[policy] Config source : $CONFIG_SOURCE"
+          if [ "$CONFIG_SOURCE" = "remote" ]; then
+            echo "[policy] Remote URL    : $REMOTE"
+          elif [ "$CONFIG_SOURCE" = "local" ]; then
+            echo "[policy] Local file    : .github/policies/config.txt"
+          else
+            echo "[policy] Source detail : defaults (no config file found)"
+          fi
+          echo "[policy] Policy source : $POLICY_SOURCE"
+          echo "[policy] Policy repo   : ${POLICY_REPO:-"(local)"}"
+          echo "[policy] Policy ref    : $POLICY_REF"
+          echo "[policy] Policy path   : $POLICY_PATH"
+          echo "[policy] Fail severity : $FAIL"
+          echo "[policy] Min severity  : $MIN"
+          echo "::endgroup::"
+
+      # ============================================
+      # Install tools (Syft + Grype)
+      # ============================================
+      - name: Install Syft
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Install Grype
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      # ============================================
+      # Load policy package allowlist
+      # ============================================
+      - name: Load policy allowlist
+        id: policy-allowlist
+        if: steps.check-ignored.outputs.ignored != 'true'
+        env:
+          POLICY_SOURCE: ${{ steps.policy-config.outputs.policy_source }}
+          POLICY_REPO: ${{ steps.policy-config.outputs.policy_repo }}
+          POLICY_REF: ${{ steps.policy-config.outputs.policy_ref }}
+          POLICY_PATH: ${{ steps.policy-config.outputs.policy_path }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          ALLOWLIST_FILE="/tmp/policy-allowlist.txt"
+          : > "$ALLOWLIST_FILE"
+
+          ECOSYSTEMS=("maven" "java-archive" "gradle" "npm" "yarn" "pnpm" "pip" "python" "poetry" "go" "gomod" "cargo" "composer" "nuget" "rubygems")
+
+          fetch_remote_file() {
+            local url="$1"
+            if curl -fsSL -H "Authorization: token ${GITHUB_TOKEN}" "$url" >> "$ALLOWLIST_FILE"; then
+              echo "" >> "$ALLOWLIST_FILE"
+              return 0
+            fi
+            return 1
+          }
+
+          fetch_local_file() {
+            local file="$1"
+            if [ -f "$file" ]; then
+              cat "$file" >> "$ALLOWLIST_FILE"
+              echo "" >> "$ALLOWLIST_FILE"
+              return 0
+            fi
+            return 1
+          }
+
+          case "${POLICY_SOURCE}" in
+            github)
+              if [ -z "$POLICY_REPO" ]; then
+                echo "Policy source is GitHub but policy_repo is empty; skipping allowlist fetch."
+              else
+                for ecosystem in "${ECOSYSTEMS[@]}"; do
+                  URL="https://raw.githubusercontent.com/${POLICY_REPO}/${POLICY_REF}/${POLICY_PATH}/${ecosystem}.txt"
+                  echo "Attempting to fetch policy allowlist from $URL"
+                  fetch_remote_file "$URL" || echo "No allowlist found for ${ecosystem} at ${URL}"
+                done
+              fi
+              ;;
+            *)
+              for ecosystem in "${ECOSYSTEMS[@]}"; do
+                FILE_PATH="${POLICY_PATH%/}/${ecosystem}.txt"
+                echo "Attempting to read local policy allowlist from $FILE_PATH"
+                fetch_local_file "$FILE_PATH" || echo "No allowlist found for ${ecosystem} at ${FILE_PATH}"
+              done
+              ;;
+          esac
+
+          # Normalize entries (remove duplicates, CRLF, comments, empty lines)
+          if [ -s "$ALLOWLIST_FILE" ]; then
+            tr -d '\r' < "$ALLOWLIST_FILE" \
+              | grep -v '^[[:space:]]*#' \
+              | awk '{$1=$1; print}' \
+              | awk 'NF {print $0}' \
+              | sort -u > /tmp/policy-allowlist-clean.txt
+            mv /tmp/policy-allowlist-clean.txt "$ALLOWLIST_FILE"
+          fi
+
+          ALLOW_COUNT=$(wc -l < "$ALLOWLIST_FILE" | tr -d ' ')
+
+          echo "Allowlist entries: $ALLOW_COUNT"
+          echo "list_file=$ALLOWLIST_FILE" >> $GITHUB_OUTPUT
+          echo "entry_count=$ALLOW_COUNT" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # Generate SBOM
+      # ============================================
+      - name: Generate SBOM (CycloneDX)
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          syft . -o cyclonedx-json > sbom.json
+
+      # ============================================
+      # Run Grype scan
+      # ============================================
+      - name: Scan SBOM with Grype
+        id: grype
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          grype db update || true
+          grype sbom:sbom.json -o json > grype.json
+
+          CRIT=$(jq '[.matches[].vulnerability.severity | select(.=="Critical")] | length' grype.json)
+          HIGH=$(jq '[.matches[].vulnerability.severity | select(.=="High")] | length' grype.json)
+
+          echo "critical=$CRIT" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # Transform Grype results -> GitHub dependency-review-style JSON
+      # ============================================
+      - name: Build GH-style vulnerable-changes JSON
+        id: vulnjson
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          jq '
+            def safe_group:
+              (
+                .artifact.metadata.pomProperties? //
+                .artifact.metadata.pom_properties? //
+                .artifact.metadata.maven? //
+                {}
+              ) as $meta |
+              (
+                $meta.groupId // $meta.groupID // $meta.group // ""
+              );
+
+            def package_id:
+              (safe_group) as $group |
+              if ($group | length) > 0 then
+                "\($group):\(.artifact.name)"
+              else
+                .artifact.name
+              end;
+
+            {
+              vulnerable_changes: [
+                .matches[] |
+                {
+                  package:       .artifact.name,
+                  group:         safe_group,
+                  package_id:    package_id,
+                  version:       .artifact.version,
+                  ecosystem:     .artifact.type,
+                  vuln_id:       .vulnerability.id,
+                  severity:      .vulnerability.severity,
+                  fixed_in: (
+                      .vulnerability.fixed_in //
+                      .vulnerability.metadata.patched_versions //
+                      .vulnerability.metadata.fix_versions //
+                      "(none)"
+                  )
+                }
+              ]
+            }
+          ' grype.json > vuln-changes.json
+
+          echo "file=vuln-changes.json" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # Build full vulnerability markdown report (pre-filter)
+      # ============================================
+      - name: Build full vulnerability report
+        id: full-report
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          FULL_REPORT_FILE="/tmp/sbom-vulnerabilities-full.md"
+          REPORT_PATH=$(scripts/grype-vuln-to-md.sh --input vuln-changes.json --output "$FULL_REPORT_FILE")
+          echo "path=$REPORT_PATH" >> $GITHUB_OUTPUT
+
+      - name: Publish full vulnerability summary
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          if [ -f "${{ steps.full-report.outputs.path }}" ]; then
+            {
+              echo "## 🔎 全量漏洞列表"
+              echo ""
+              cat "${{ steps.full-report.outputs.path }}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Full report not found at ${{ steps.full-report.outputs.path }}"
+          fi
+
+      # ============================================
+      # Filter vulnerabilities by policy allowlist
+      # ============================================
+      - name: Filter vulnerabilities by policy
+        id: policy-filter
+        if: steps.check-ignored.outputs.ignored != 'true'
+        env:
+          ALLOW_FILE: ${{ steps.policy-allowlist.outputs.list_file }}
+          MIN_SEVERITY: ${{ steps.policy-config.outputs.min_severity }}
+          FILTER_DEBUG: "true"
+        run: |
+          set -euo pipefail
+
+          SOURCE_FILE="vuln-changes.json"
+          TARGET_FILE="vuln-changes-filtered.json"
+
+          echo "Filtering vulnerabilities (allowlist + min severity)."
+          python3 .github/scripts/filter-allowlist.py \
+            --input "$SOURCE_FILE" \
+            --output "$TARGET_FILE" \
+            --min-severity "${MIN_SEVERITY}" \
+            ${ALLOW_FILE:+--allowlist "${ALLOW_FILE}"} \
+            ${FILTER_DEBUG:+--debug} || {
+              echo "Filtering script failed" >&2
+              exit 1
+            }
+
+          FILTERED_COUNT=$(jq '.vulnerable_changes | length' "$TARGET_FILE")
+          echo "Filtered vulnerabilities: $FILTERED_COUNT"
+          echo "file=$TARGET_FILE" >> $GITHUB_OUTPUT
+
+      - name: Convert vulnerable changes to Markdown
+        id: vuln_table
+        if: steps.check-ignored.outputs.ignored != 'true'
+        env:
+          CRITICAL_COUNT: ${{ steps.grype.outputs.critical }}
+          HIGH_COUNT: ${{ steps.grype.outputs.high }}
+        run: |
+          VULN_FILE="${{ steps.policy-filter.outputs.file }}"
+          if [ -z "$VULN_FILE" ]; then
+            VULN_FILE="vuln-changes.json"
+          fi
+
+          MARKDOWN_FILE=$(scripts/grype-vuln-to-md.sh --input "$VULN_FILE")
+          COMMENT_FILE=$(mktemp "${TMPDIR:-/tmp}/vuln-comment-XXXXXX.md")
+
+          echo "table_file=$MARKDOWN_FILE" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "table<<EOF"
+            cat "$MARKDOWN_FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## 🔍 SBOM Vulnerability Scan (Syft + Grype)"
+            echo "**Critical:** ${CRITICAL_COUNT:-0}  "
+            echo "**High:** ${HIGH_COUNT:-0}"
+            echo
+          } > "$COMMENT_FILE"
+
+          cat "$MARKDOWN_FILE" >> "$COMMENT_FILE"
+
+          FULL_REPORT_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}?check_suite_focus=true"
+          {
+            echo ""
+            echo "[查看完整漏洞列表](${FULL_REPORT_URL})"
+          } >> "$COMMENT_FILE"
+
+          {
+            echo "body<<EOF"
+            cat "$COMMENT_FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ============================================
+      # PR Comment (summary + table)
+      # ============================================
+      - name: Comment results in PR
+        if: steps.check-ignored.outputs.ignored != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          recreate: true
+          header: "sbom_vuln_scan"
+          message: ${{ steps.vuln_table.outputs.body }}
+
+      # ============================================
+      # Block merge based on policy
+      # ============================================
+      - name: Fail on critical/high
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          CRIT=${{ steps.grype.outputs.critical }}
+          HIGH=${{ steps.grype.outputs.high }}
+          FAIL=${{ steps.policy-config.outputs.fail_on_severity }}
+
+          if [ "$CRIT" -gt 0 ]; then
+            echo "Critical vulnerabilities found."
+            exit 1
+          fi
+
+          if [ "$FAIL" = "high" ] && [ "$HIGH" -gt 0 ]; then
+            echo "High vulnerabilities found (policy blocks high)."
+            exit 1
+          fi
