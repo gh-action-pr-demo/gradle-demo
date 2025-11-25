@@ -157,56 +157,118 @@ jobs:
         run: |
           set -euo pipefail
 
-          ECOSYSTEM="unknown"
+          PRIMARY="unknown"
+          HAS_GRADLE="false"
+          HAS_MAVEN="false"
+          HAS_NPM="false"
+          HAS_YARN="false"
+          HAS_PNPM="false"
+          HAS_PIP="false"
+          HAS_POETRY="false"
+          HAS_GO="false"
+
           NEEDS_JAVA="false"
           NEEDS_NODE="false"
           NEEDS_PYTHON="false"
           NEEDS_GO="false"
-          ARTIFACT_HINT=""
+
+          declare -a HINTS=()
+
+          mark_primary() {
+            local name="$1"
+            if [ "$PRIMARY" = "unknown" ]; then
+              PRIMARY="$name"
+            fi
+          }
+
+          add_hint() {
+            local path="$1"
+            if [ -n "$path" ]; then
+              HINTS+=("$path")
+            fi
+          }
 
           if [ -f "gradlew" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-            ECOSYSTEM="gradle"
+            HAS_GRADLE="true"
             NEEDS_JAVA="true"
-            ARTIFACT_HINT="build/install"
-          elif [ -f "pom.xml" ]; then
-            ECOSYSTEM="maven"
-            NEEDS_JAVA="true"
-            ARTIFACT_HINT="target"
-          elif [ -f "pnpm-lock.yaml" ]; then
-            ECOSYSTEM="pnpm"
-            NEEDS_NODE="true"
-            ARTIFACT_HINT="node_modules"
-          elif [ -f "yarn.lock" ]; then
-            ECOSYSTEM="yarn"
-            NEEDS_NODE="true"
-            ARTIFACT_HINT="node_modules"
-          elif [ -f "package-lock.json" ] || [ -f "package.json" ]; then
-            ECOSYSTEM="npm"
-            NEEDS_NODE="true"
-            ARTIFACT_HINT="node_modules"
-          elif [ -f "poetry.lock" ]; then
-            ECOSYSTEM="poetry"
-            NEEDS_PYTHON="true"
-            ARTIFACT_HINT=".venv"
-          elif [ -f "requirements.txt" ]; then
-            ECOSYSTEM="pip"
-            NEEDS_PYTHON="true"
-            ARTIFACT_HINT="build/python-deps"
-          elif [ -f "go.mod" ]; then
-            ECOSYSTEM="go"
-            NEEDS_GO="true"
-            ARTIFACT_HINT="bin"
+            mark_primary "gradle"
+            add_hint "build/install"
           fi
 
-          echo "[detect] ecosystem=$ECOSYSTEM, artifact_hint=${ARTIFACT_HINT:-"(none)"}"
+          if [ -f "pom.xml" ]; then
+            HAS_MAVEN="true"
+            NEEDS_JAVA="true"
+            mark_primary "maven"
+            add_hint "target"
+          fi
+
+          if [ -f "pnpm-lock.yaml" ]; then
+            HAS_PNPM="true"
+            NEEDS_NODE="true"
+            mark_primary "pnpm"
+            add_hint "node_modules"
+          fi
+
+          if [ -f "yarn.lock" ]; then
+            HAS_YARN="true"
+            NEEDS_NODE="true"
+            mark_primary "yarn"
+            add_hint "node_modules"
+          fi
+
+          if [ -f "package-lock.json" ] || [ -f "package.json" ]; then
+            HAS_NPM="true"
+            NEEDS_NODE="true"
+            mark_primary "npm"
+            add_hint "node_modules"
+          fi
+
+          if [ -f "poetry.lock" ]; then
+            HAS_POETRY="true"
+            NEEDS_PYTHON="true"
+            mark_primary "poetry"
+            add_hint ".venv"
+          fi
+
+          if [ -f "requirements.txt" ]; then
+            HAS_PIP="true"
+            NEEDS_PYTHON="true"
+            mark_primary "pip"
+            add_hint "build/python-deps"
+          fi
+
+          if [ -f "go.mod" ]; then
+            HAS_GO="true"
+            NEEDS_GO="true"
+            mark_primary "go"
+            add_hint "bin"
+          fi
+
+          if [ "$PRIMARY" = "unknown" ]; then
+            PRIMARY="source"
+          fi
+
+          ARTIFACT_HINT="${HINTS[0]:-}"
+          HINTS_JOINED=$(IFS=','; echo "${HINTS[*]}")
+
+          echo "[detect] primary=$PRIMARY, artifact hints=${HINTS_JOINED:-"(none)"}"
 
           {
-            echo "ecosystem=$ECOSYSTEM"
+            echo "primary_ecosystem=$PRIMARY"
+            echo "has_gradle=$HAS_GRADLE"
+            echo "has_maven=$HAS_MAVEN"
+            echo "has_npm=$HAS_NPM"
+            echo "has_yarn=$HAS_YARN"
+            echo "has_pnpm=$HAS_PNPM"
+            echo "has_pip=$HAS_PIP"
+            echo "has_poetry=$HAS_POETRY"
+            echo "has_go=$HAS_GO"
             echo "needs_java=$NEEDS_JAVA"
             echo "needs_node=$NEEDS_NODE"
             echo "needs_python=$NEEDS_PYTHON"
             echo "needs_go=$NEEDS_GO"
             echo "artifact_hint=$ARTIFACT_HINT"
+            echo "artifact_hints=$HINTS_JOINED"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK
@@ -235,50 +297,50 @@ jobs:
           go-version: '1.21'
 
       - name: Ensure Gradle wrapper permissions
-        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'gradle'
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_gradle == 'true'
         run: chmod +x ./gradlew
 
       - name: Build project artifacts (Gradle)
-        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'gradle'
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_gradle == 'true'
         uses: gradle/gradle-build-action@v2
         with:
           arguments: clean build installDist --stacktrace
 
       # - name: Build project artifacts (Maven)
-      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'maven'
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_maven == 'true'
       #   run: mvn -B clean package
 
       - name: Install project dependencies (npm)
-        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'npm'
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_npm == 'true'
         run: npm ci
 
       # - name: Install project dependencies (Yarn)
-      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'yarn'
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_yarn == 'true'
       #   run: |
       #     corepack enable
       #     yarn install --frozen-lockfile
 
       # - name: Install project dependencies (pnpm)
-      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'pnpm'
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_pnpm == 'true'
       #   run: |
       #     corepack enable
       #     pnpm install --frozen-lockfile
 
       # - name: Install project dependencies (pip)
-      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'pip'
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_pip == 'true'
       #   run: |
       #     python -m pip install --upgrade pip
       #     python -m pip install -r requirements.txt -t build/python-deps
 
       # - name: Install project dependencies (Poetry)
-      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'poetry'
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_poetry == 'true'
       #   run: |
       #     python -m pip install --upgrade pip
       #     python -m pip install poetry
       #     poetry install --no-interaction --no-root
 
       # - name: Build project artifacts (Go)
-      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'go'
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_go == 'true'
       #   run: |
       #     go mod download
       #     go build ./...
@@ -298,9 +360,12 @@ jobs:
             fi
           }
 
-          HINT="${{ steps.detect-ecosystem.outputs.artifact_hint }}"
-          if [ -n "$HINT" ]; then
-            add_if_exists "$HINT"
+          HINTS="${{ steps.detect-ecosystem.outputs.artifact_hints }}"
+          if [ -n "$HINTS" ]; then
+            IFS=',' read -r -a HINT_ARRAY <<< "$HINTS"
+            for hint in "${HINT_ARRAY[@]}"; do
+              [ -n "$hint" ] && add_if_exists "$hint"
+            done
           fi
 
           add_if_exists "build/install"
