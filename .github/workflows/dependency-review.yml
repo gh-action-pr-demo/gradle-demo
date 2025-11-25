@@ -1,4 +1,4 @@
-name: Dependency Review
+name: Dependency Review (SBOM + Grype Enhanced)
 
 on:
   pull_request:
@@ -7,7 +7,7 @@ on:
     types: [labeled, unlabeled]
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
   security-events: write
   checks: write
@@ -16,704 +16,751 @@ permissions:
 jobs:
   dependency-review:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check Context (PR or Push)
-        id: context-check
+      # ============================================
+      # Determine PR number (retain your logic)
+      # ============================================
+      - name: Get PR number from context
+        id: get-pr-number
         uses: actions/github-script@v7
         with:
           script: |
-            let prNumber = '';
-            let isPr = 'false';
-            let isPushToMain = 'false';
-            
+            let prNumber;
             if (context.eventName === 'issues') {
-              // Handle label events
               const labelName = context.payload.label?.name;
-              const action = context.payload.action; // 'labeled' or 'unlabeled'
-              
-              console.log(`=== Label Event Triggered ===`);
-              console.log(`Event Type: ${context.eventName}`);
-              console.log(`Action: ${action}`);
-              console.log(`Label Name: ${labelName}`);
-              console.log(`Issue Number: ${context.payload.issue?.number}`);
-
-              if (labelName === 'dependency-check-ignore' && context.payload.issue?.pull_request) {
-                prNumber = context.payload.issue.number;
-                isPr = 'true';
-                console.log(`Detected label event on PR #${prNumber}`);
-              } else {
-                console.log(`Label ${labelName} is not dependency-check-ignore or not on a PR, skipping PR context`);
+              if (labelName !== 'dependency-check-ignore') {
+                core.setOutput('is_pr', 'false');
+                return;
               }
-            } else if (context.eventName === 'pull_request') {
-              // Handle PR events
+              prNumber = context.payload.issue.number;
+              if (!context.payload.issue.pull_request) {
+                core.setOutput('is_pr', 'false');
+                return;
+              }
+            } else {
               prNumber = context.payload.pull_request.number;
-              isPr = 'true';
-            } else if (context.eventName === 'push' && (context.ref === 'refs/heads/main' || context.ref === 'refs/heads/master')) {
-              // Handle Push to Main events (for baseline generation)
-              isPushToMain = 'true';
-              console.log('Push to main detected - will generate baseline graph');
             }
-            
             core.setOutput('pr_number', prNumber.toString());
-            core.setOutput('is_pr', isPr);
-            core.setOutput('is_push_to_main', isPushToMain);
-            
-            console.log(`Event: ${context.eventName}`);
-            console.log(`Is PR: ${isPr}`);
-            console.log(`Is Push to Main: ${isPushToMain}`);
+            core.setOutput('is_pr', 'true');
 
-      - name: Checkout repository
-        if: steps.context-check.outputs.is_pr == 'true' || steps.context-check.outputs.is_push_to_main == 'true'
+      # ============================================
+      # Checkout
+      # ============================================
+      - name: Checkout
+        if: steps.get-pr-number.outputs.is_pr == 'true'
         uses: actions/checkout@v4
         with:
-          # Explicitly checkout PR HEAD for PRs, or default for Push
-          ref: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.sha || '' }}
           fetch-depth: 0
 
+      # ============================================
+      # Check ignore label (retain your logic)
+      # ============================================
       - name: Check if dependency check is ignored
         id: check-ignored
-        if: steps.context-check.outputs.is_pr == 'true'
+        if: steps.get-pr-number.outputs.is_pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
-            const { data: issue } = await github.rest.issues.get({
+            const prNumber = parseInt('${{ steps.get-pr-number.outputs.pr_number }}', 10);
+            const issue = (await github.rest.issues.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: parseInt(prNumber)
-            });
-            
+              issue_number: prNumber
+            })).data;
+
             const labels = issue.labels.map(l => l.name);
-            const isIgnored = labels.includes('dependency-check-ignore');
-            
-            console.log(`PR Labels: ${labels.join(', ')}`);
-            console.log(`Check Ignored: ${isIgnored}`);
-            
-            core.setOutput('ignored', isIgnored.toString());
-            
-            if (isIgnored) {
-              console.log('Dependency check has been ignored, skipping check');
-            }
+            const ignored = labels.includes('dependency-check-ignore');
+            core.setOutput('ignored', ignored.toString());
 
-      - name: Skip if ignored and post comment
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
-            
-            // Get PR details
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: parseInt(prNumber)
-            });
-            
-            const summaryUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            
-            // Create comment explaining check was skipped due to label
-            let skipComment = `## 🔒 Dependency Review\n\n`;
-            skipComment += `⏭️ **Dependency Check Skipped**\n\n`;
-            skipComment += `**Reason**: PR has been tagged with \`dependency-check-ignore\` label\n\n`;
-            skipComment += `**Commit**: \`${pr.head.sha.substring(0, 7)}\`\n\n`;
-            skipComment += `<a href="${summaryUrl}" target="_blank" rel="noopener noreferrer">📊 View Actions Run Details</a>\n\n`;
-            skipComment += `**Tip**: To re-enable the check, please remove the \`dependency-check-ignore\` label.\n\n`;
-            skipComment += `---\n`;
-            skipComment += `*This comment was automatically generated by GitHub Actions*\n`;
-            
-            try {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: parseInt(prNumber),
-                body: skipComment
-              });
-              console.log('Created "check skipped" comment');
-            } catch (error) {
-              console.error('Failed to create comment:', error);
-            }
-            
-            // Create a successful check run to override previous failure status
-            try {
-              await github.rest.checks.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: 'Dependency Review',
-                head_sha: pr.head.sha,
-                status: 'completed',
-                conclusion: 'success',
-                output: {
-                  title: 'Dependency Check Skipped',
-                  summary: 'This PR has been tagged with `dependency-check-ignore` label, dependency check has been skipped.'
-                }
-              });
-              console.log('Created successful check run');
-            } catch (checkError) {
-              console.error('Failed to create check run:', checkError);
-            }
-            
-            // Exit successfully
-            process.exit(0);
-
+      # ============================================
+      # Read policy (retain your logic)
+      # ============================================
       - name: Read policy configuration
         id: policy-config
-        if: (steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true') || steps.context-check.outputs.is_push_to_main == 'true'
+        if: steps.get-pr-number.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Try to read config from GitHub first (for centralized config)
-          # If fails, fall back to local config
-          
           CONFIG_SOURCE=""
-          CONFIG_FILE_PATH=""
-          
-          # Try GitHub config first
-          GITHUB_CONFIG_REPO="${GITHUB_CONFIG_REPO:-gh-action-pr-demo/config}"
-          GITHUB_CONFIG_REF="${GITHUB_CONFIG_REF:-main}"
-          GITHUB_CONFIG_PATH=".github/policies/config.txt"
-          GITHUB_CONFIG_URL="https://raw.githubusercontent.com/$GITHUB_CONFIG_REPO/$GITHUB_CONFIG_REF/$GITHUB_CONFIG_PATH"
-          
-          echo "Attempting to read config from GitHub: $GITHUB_CONFIG_URL"
-          if curl -f -s -H "Authorization: token $GITHUB_TOKEN" "$GITHUB_CONFIG_URL" > /tmp/policy-config.txt 2>/dev/null; then
-            CONFIG_SOURCE="github"
-            CONFIG_FILE_PATH="/tmp/policy-config.txt"
-            echo "✓ Config loaded from GitHub: $GITHUB_CONFIG_REPO"
+          CONFIG_FILE="/tmp/policy.txt"
+          REMOTE="https://raw.githubusercontent.com/gh-action-pr-demo/config/main/.github/policies/config.txt"
+
+          if curl -fsSL -H "Authorization: token $GITHUB_TOKEN" "$REMOTE" > "$CONFIG_FILE"; then
+            CONFIG_SOURCE="remote"
           elif [ -f ".github/policies/config.txt" ]; then
+            cp .github/policies/config.txt "$CONFIG_FILE"
             CONFIG_SOURCE="local"
-            CONFIG_FILE_PATH=".github/policies/config.txt"
-            echo "✓ Config loaded from LOCAL: $CONFIG_FILE_PATH"
           else
-            echo "⚠ No config file found, using defaults"
             CONFIG_SOURCE="default"
           fi
-          
-          # Parse configuration
+
+          # Helper to read config values (returns empty string if missing)
+          read_config_value() {
+            local key="$1"
+            local default="$2"
+            local value
+            value=$(grep "^${key}:" "$CONFIG_FILE" | head -n1 | cut -d: -f2- | tr -d '[:space:]')
+            if [ -z "$value" ]; then
+              echo "$default"
+            else
+              echo "$value"
+            fi
+          }
+
           if [ "$CONFIG_SOURCE" != "default" ]; then
-            echo "Configuration file content:"
-            cat "$CONFIG_FILE_PATH"
-            echo ""
-            
-            # Parse policy_source
-            POLICY_SOURCE=$(grep "^policy_source:" "$CONFIG_FILE_PATH" | cut -d':' -f2 | tr -d ' ' || echo "local")
-            
-            # Parse GitHub policy repo settings (used if policy_source=github)
-            POLICY_REPO=$(grep "^policy_repo:" "$CONFIG_FILE_PATH" | cut -d':' -f2 | tr -d ' ' || echo "")
-            POLICY_REF=$(grep "^policy_ref:" "$CONFIG_FILE_PATH" | cut -d':' -f2 | tr -d ' ' || echo "main")
-            POLICY_PATH=$(grep "^policy_path:" "$CONFIG_FILE_PATH" | cut -d':' -f2 | tr -d ' ' || echo ".github/policies")
-            
-            # Parse severity settings
-            FAIL_ON_SEVERITY=$(grep "^fail_on_severity:" "$CONFIG_FILE_PATH" | cut -d':' -f2 | tr -d ' ' || echo "high")
-            MIN_SEVERITY=$(grep "^min_severity:" "$CONFIG_FILE_PATH" | cut -d':' -f2 | tr -d ' ' || echo "critical")
+            FAIL=$(read_config_value "fail_on_severity" "high")
+            MIN=$(read_config_value "min_severity" "critical")
+            POLICY_SOURCE=$(read_config_value "policy_source" "local")
+            POLICY_REPO=$(read_config_value "policy_repo" "")
+            POLICY_REF=$(read_config_value "policy_ref" "main")
+            POLICY_PATH=$(read_config_value "policy_path" ".github/policies")
           else
-            # Defaults
+            FAIL="high"
+            MIN="critical"
             POLICY_SOURCE="local"
             POLICY_REPO=""
             POLICY_REF="main"
             POLICY_PATH=".github/policies"
-            FAIL_ON_SEVERITY="high"
-            MIN_SEVERITY="critical"
           fi
-          
-          # Set outputs
+
+          echo "fail_on_severity=$FAIL" >> $GITHUB_OUTPUT
+          echo "min_severity=$MIN" >> $GITHUB_OUTPUT
           echo "policy_source=$POLICY_SOURCE" >> $GITHUB_OUTPUT
           echo "policy_repo=$POLICY_REPO" >> $GITHUB_OUTPUT
           echo "policy_ref=$POLICY_REF" >> $GITHUB_OUTPUT
           echo "policy_path=$POLICY_PATH" >> $GITHUB_OUTPUT
-          echo "fail_on_severity=$FAIL_ON_SEVERITY" >> $GITHUB_OUTPUT
-          echo "min_severity=$MIN_SEVERITY" >> $GITHUB_OUTPUT
-          
-          echo ""
-          echo "=== Configuration Summary ==="
-          echo "Policy Source: $POLICY_SOURCE"
-          if [ "$POLICY_SOURCE" = "github" ]; then
-            echo "Policy Repo: $POLICY_REPO"
-            echo "Policy Ref: $POLICY_REF"
-            echo "Policy Path: $POLICY_PATH"
-          fi
-          echo "Fail on Severity: $FAIL_ON_SEVERITY"
-          echo "Min Severity: $MIN_SEVERITY"
-          echo "============================"
 
-      # Auto-detect and submit Gradle dependencies
-      - name: Detect Gradle project and JDK version
-        id: detect-gradle
-        if: (steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true') || steps.context-check.outputs.is_push_to_main == 'true'
-        run: |
-          # Check for Gradle build files (supports multi-module projects)
-          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] || find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) | grep -q .; then
-            echo "is_gradle=true" >> $GITHUB_OUTPUT
-            echo "✓ Gradle project detected"
-            
-            # Auto-detect Java version from gradle.properties or use default
-            JAVA_VERSION="17"  # Default to LTS
-            
-            if [ -f "gradle.properties" ]; then
-              # Try to extract Java version from gradle.properties
-              DETECTED_VERSION=$(grep -E "^(java\.?)?target(Compatibility)?|sourceCompatibility" gradle.properties | head -1 | grep -oE '[0-9]+' || echo "")
-              if [ -n "$DETECTED_VERSION" ]; then
-                JAVA_VERSION="$DETECTED_VERSION"
-                echo "ℹ Detected Java version from gradle.properties: $JAVA_VERSION"
-              fi
-            fi
-            
-            # Try to detect from build.gradle
-            if [ -f "build.gradle" ] && [ "$JAVA_VERSION" = "17" ]; then
-              DETECTED_VERSION=$(grep -E "sourceCompatibility|targetCompatibility" build.gradle | head -1 | grep -oE '[0-9]+' || echo "")
-              if [ -n "$DETECTED_VERSION" ]; then
-                JAVA_VERSION="$DETECTED_VERSION"
-                echo "ℹ Detected Java version from build.gradle: $JAVA_VERSION"
-              fi
-            fi
-            
-            # Validate Java version (must be >= 8)
-            if [ "$JAVA_VERSION" -lt 8 ]; then
-              echo "⚠ Java version $JAVA_VERSION is too old, using 17 instead"
-              JAVA_VERSION="17"
-            fi
-            
-            echo "java_version=$JAVA_VERSION" >> $GITHUB_OUTPUT
-            echo "✓ Will use Java $JAVA_VERSION for Gradle build"
-            
-            # Detect all Gradle modules for better reporting
-            MODULE_COUNT=$(find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) | wc -l | tr -d ' ')
-            echo "ℹ Found $MODULE_COUNT Gradle module(s)"
+          echo "::group::Policy Debug Details"
+          echo "[policy] Config source : $CONFIG_SOURCE"
+          if [ "$CONFIG_SOURCE" = "remote" ]; then
+            echo "[policy] Remote URL    : $REMOTE"
+          elif [ "$CONFIG_SOURCE" = "local" ]; then
+            echo "[policy] Local file    : .github/policies/config.txt"
           else
-            echo "is_gradle=false" >> $GITHUB_OUTPUT
-            echo "ℹ No Gradle project detected"
+            echo "[policy] Source detail : defaults (no config file found)"
+          fi
+          echo "[policy] Policy source : $POLICY_SOURCE"
+          echo "[policy] Policy repo   : ${POLICY_REPO:-"(local)"}"
+          echo "[policy] Policy ref    : $POLICY_REF"
+          echo "[policy] Policy path   : $POLICY_PATH"
+          echo "[policy] Fail severity : $FAIL"
+          echo "[policy] Min severity  : $MIN"
+          echo "::endgroup::"
+
+      # ============================================
+      # Detect ecosystem + prepare runtimes/artifacts
+      # ============================================
+      - name: Detect project ecosystem
+        id: detect-ecosystem
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          set -euo pipefail
+
+          PRIMARY="unknown"
+          HAS_GRADLE="false"
+          HAS_MAVEN="false"
+          HAS_NPM="false"
+          HAS_YARN="false"
+          HAS_PNPM="false"
+          HAS_PIP="false"
+          HAS_POETRY="false"
+          HAS_GO="false"
+
+          NEEDS_JAVA="false"
+          NEEDS_NODE="false"
+          NEEDS_PYTHON="false"
+          NEEDS_GO="false"
+
+          declare -a HINTS=()
+          declare -a NPM_DIRS=()
+
+          add_unique() {
+            local value="$1"
+            local array_name="$2"
+            local -n ref="$array_name"
+            if [ -z "$value" ]; then
+              return
+            fi
+            for existing in "${ref[@]}"; do
+              if [ "$existing" = "$value" ]; then
+                return
+              fi
+            done
+            ref+=("$value")
+          }
+
+          mark_primary() {
+            local name="$1"
+            if [ "$PRIMARY" = "unknown" ]; then
+              PRIMARY="$name"
+            fi
+          }
+
+          add_hint() {
+            local path="$1"
+            path="${path%/}"
+            add_unique "$path" HINTS
+          }
+
+          collect_npm_dirs() {
+            local -a found=()
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+              dir=$(dirname "$file")
+              dir="${dir#./}"
+              if [ -z "$dir" ]; then
+                dir="."
+              fi
+              add_unique "$dir" NPM_DIRS
+            done < <(
+              find . -maxdepth 5 -type f \
+                \( -name 'package-lock.json' -o -name 'package.json' \) \
+                ! -path '*/node_modules/*' ! -path '*/.git/*' \
+                ! -path '*/build/*' ! -path '*/dist/*' \
+                2>/dev/null
+            )
+          }
+
+          if [ -f "gradlew" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            HAS_GRADLE="true"
+            NEEDS_JAVA="true"
+            mark_primary "gradle"
+            add_hint "build/install"
           fi
 
-      - name: Set up JDK for Gradle
-        if: steps.detect-gradle.outputs.is_gradle == 'true'
+          if [ -f "pom.xml" ]; then
+            HAS_MAVEN="true"
+            NEEDS_JAVA="true"
+            mark_primary "maven"
+            add_hint "target"
+          fi
+
+          if [ -f "pnpm-lock.yaml" ]; then
+            HAS_PNPM="true"
+            NEEDS_NODE="true"
+            mark_primary "pnpm"
+            add_hint "node_modules"
+          fi
+
+          if [ -f "yarn.lock" ]; then
+            HAS_YARN="true"
+            NEEDS_NODE="true"
+            mark_primary "yarn"
+            add_hint "node_modules"
+          fi
+
+          if [ -f "package-lock.json" ] || [ -f "package.json" ]; then
+            HAS_NPM="true"
+            NEEDS_NODE="true"
+            mark_primary "npm"
+            add_hint "node_modules"
+          fi
+
+          if [ -f "poetry.lock" ]; then
+            HAS_POETRY="true"
+            NEEDS_PYTHON="true"
+            mark_primary "poetry"
+            add_hint ".venv"
+          fi
+
+          if [ -f "requirements.txt" ]; then
+            HAS_PIP="true"
+            NEEDS_PYTHON="true"
+            mark_primary "pip"
+            add_hint "build/python-deps"
+          fi
+
+          if [ -f "go.mod" ]; then
+            HAS_GO="true"
+            NEEDS_GO="true"
+            mark_primary "go"
+            add_hint "bin"
+          fi
+
+          collect_npm_dirs
+
+          if [ ${#NPM_DIRS[@]} -gt 0 ]; then
+            HAS_NPM="true"
+            NEEDS_NODE="true"
+            for dir in "${NPM_DIRS[@]}"; do
+              if [ "$dir" = "." ]; then
+                add_hint "node_modules"
+              else
+                add_hint "${dir}/node_modules"
+              fi
+            done
+          fi
+
+          if [ "$PRIMARY" = "unknown" ]; then
+            PRIMARY="source"
+          fi
+
+          ARTIFACT_HINT="${HINTS[0]:-}"
+          HINTS_JOINED=$(IFS=','; echo "${HINTS[*]}")
+
+          echo "[detect] primary=$PRIMARY, artifact hints=${HINTS_JOINED:-"(none)"}"
+
+          {
+            echo "primary_ecosystem=$PRIMARY"
+            echo "has_gradle=$HAS_GRADLE"
+            echo "has_maven=$HAS_MAVEN"
+            echo "has_npm=$HAS_NPM"
+            echo "has_yarn=$HAS_YARN"
+            echo "has_pnpm=$HAS_PNPM"
+            echo "has_pip=$HAS_PIP"
+            echo "has_poetry=$HAS_POETRY"
+            echo "has_go=$HAS_GO"
+            echo "needs_java=$NEEDS_JAVA"
+            echo "needs_node=$NEEDS_NODE"
+            echo "needs_python=$NEEDS_PYTHON"
+            echo "needs_go=$NEEDS_GO"
+            echo "artifact_hint=$ARTIFACT_HINT"
+            echo "artifact_hints=$HINTS_JOINED"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ ${#NPM_DIRS[@]} -gt 0 ]; then
+            {
+              echo "npm_dirs<<EOF"
+              printf '%s\n' "${NPM_DIRS[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_dirs=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_java == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: ${{ steps.detect-gradle.outputs.java_version }}
+          java-version: '17'
 
-      - name: Setup Gradle
-        if: steps.detect-gradle.outputs.is_gradle == 'true'
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Submit Gradle dependency graph
-        if: steps.detect-gradle.outputs.is_gradle == 'true'
-        uses: gradle/actions/dependency-submission@v3
+      - name: Set up Node.js
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_node == 'true'
+        uses: actions/setup-node@v4
         with:
-          # This action automatically handles multi-module projects
-          # It will discover all build.gradle files recursively
-          dependency-graph: generate-and-submit
-        env:
-          # Force submission to associate with the PR HEAD commit
-          # This is critical for dependency-review to find the graph
-          GITHUB_SHA: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.sha || '' }}
-          GITHUB_REF: ${{ steps.context-check.outputs.is_pr == 'true' && github.event.pull_request.head.ref || '' }}
+          node-version: '20'
 
-      - name: Wait and Debug Dependency Graph
-        if: steps.detect-gradle.outputs.is_gradle == 'true'
-        run: |
-          echo "Waiting for GitHub to process dependency submission..."
-          sleep 30
-          
-          echo "=== Debug: Checking Generated Dependency Graph Reports ==="
-          ls -R dependency-graph-reports || echo "Directory not found"
-          
-          echo "=== Debug: Report Content Preview ==="
-          # Find and cat the first json report
-          REPORT_FILE=$(find dependency-graph-reports -name "*.json" | head -n 1)
-          if [ -f "$REPORT_FILE" ]; then
-            echo "Found report: $REPORT_FILE"
-            echo "--- FULL REPORT CONTENT START ---"
-            cat "$REPORT_FILE"
-            echo "--- FULL REPORT CONTENT END ---"
-            
-            echo "Checking for key packages in report:"
-            echo "1. log4j:"
-            grep "log4j" "$REPORT_FILE" || echo "log4j NOT FOUND"
-            echo "2. commons-collections:"
-            grep "commons-collections" "$REPORT_FILE" || echo "commons-collections NOT FOUND"
-            echo "3. fastjson:"
-            grep "fastjson" "$REPORT_FILE" || echo "fastjson NOT FOUND"
-          else
-            echo "No JSON report file found!"
-          fi
-          
-          echo "=== Debug: Gradle Dependencies Check ==="
-          ./gradlew dependencies --configuration runtimeClasspath
-
-      - name: Ensure Empty Baseline Exists
-        id: ensure-baseline
-        # Only use empty baseline for non-Gradle projects (e.g. Maven)
-        # Gradle projects use dependency submission which works better with standard PR comparison
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle != 'true'
-        continue-on-error: true
-        run: |
-          BASELINE_BRANCH="dependency-review-baseline"
-          
-          # Check if remote branch exists
-          if git ls-remote --exit-code --heads origin "$BASELINE_BRANCH"; then
-            echo "Baseline branch '$BASELINE_BRANCH' already exists."
-            echo "baseline_ref=$BASELINE_BRANCH" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          echo "Baseline branch not found. Creating..."
-          
-          # Configure git for push
-          git config user.name "GitHub Action"
-          git config user.email "action@github.com"
-          
-          # Save current HEAD
-          CURRENT_HEAD=$(git rev-parse HEAD)
-          
-          # Create orphan branch
-          git checkout --orphan "$BASELINE_BRANCH"
-          git rm -rf .
-          git commit --allow-empty -m "Initial empty baseline for dependency review"
-          
-          # Push to remote
-          git push origin "$BASELINE_BRANCH" || echo "Push failed (might already exist or no permission), ignoring..."
-          
-          # Restore state
-          git checkout "$CURRENT_HEAD"
-          
-          echo "baseline_ref=$BASELINE_BRANCH" >> $GITHUB_OUTPUT
-
-      - name: Dependency Review (Gradle)
-        id: dep-review-gradle
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle == 'true'
-        continue-on-error: true
-        uses: actions/dependency-review-action@v4
+      - name: Set up Python
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_python == 'true'
+        uses: actions/setup-python@v5
         with:
-          # For Gradle, try to compare against PR base
-          # If base doesn't have a dependency graph yet (first PR), this may fail
-          # We'll handle the fallback in a separate step
-          base-ref: ${{ github.event.pull_request.base.sha }}
-          head-ref: ${{ github.event.pull_request.head.sha }}
-          fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
-          comment-summary-in-pr: never
+          python-version: '3.11'
 
-      - name: Dependency Review (Gradle - Fallback to Full Scan)
-        id: dep-review-gradle-fallback
-        # Run if the primary Gradle review failed (likely because base has no dependency graph)
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle == 'true' && steps.dep-review-gradle.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/dependency-review-action@v4
+      - name: Set up Go
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_go == 'true'
+        uses: actions/setup-go@v5
         with:
-          # Fallback: Use empty baseline for full scan
-          # This ensures vulnerability detection works even on the first PR
-          base-ref: dependency-review-baseline
-          head-ref: ${{ github.event.pull_request.head.sha }}
-          fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
-          comment-summary-in-pr: never
+          go-version: '1.21'
 
-      - name: Dependency Review (Non-Gradle)
-        id: dep-review-other
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.detect-gradle.outputs.is_gradle != 'true'
-        continue-on-error: true
-        uses: actions/dependency-review-action@v4
+      - name: Ensure Gradle wrapper permissions
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_gradle == 'true'
+        run: chmod +x ./gradlew
+
+      - name: Build project artifacts (Gradle)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_gradle == 'true'
+        uses: gradle/gradle-build-action@v2
         with:
-          # For non-Gradle projects, use empty branch as base to force full scan
-          base-ref: dependency-review-baseline
-          head-ref: ${{ github.sha }}
-          fail-on-severity: ${{ steps.policy-config.outputs.fail_on_severity }}
-          comment-summary-in-pr: never
+          arguments: clean build installDist --stacktrace
 
-      # Write vulnerable-changes to file (avoid shell parsing issues)
-      - name: Write vulnerable changes to file
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
-        run: |
-          # Determine which output to use
-          if [ "${{ steps.detect-gradle.outputs.is_gradle }}" == "true" ]; then
-            # For Gradle, check if primary review succeeded or use fallback
-            if [ "${{ steps.dep-review-gradle.outcome }}" == "success" ]; then
-              echo "Using primary Gradle dependency review output"
-              echo '${{ steps.dep-review-gradle.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
-            elif [ "${{ steps.dep-review-gradle-fallback.outcome }}" == "success" ]; then
-              echo "Using fallback Gradle dependency review output (full scan)"
-              echo '${{ steps.dep-review-gradle-fallback.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
-            else
-              echo "Both Gradle dependency review steps failed or were skipped"
-              echo '[]' > /tmp/vulnerable-changes.json
-            fi
-          else
-            # Non-Gradle projects
-            echo '${{ steps.dep-review-other.outputs.vulnerable-changes }}' > /tmp/vulnerable-changes.json
-          fi
+      # - name: Build project artifacts (Maven)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_maven == 'true'
+      #   run: mvn -B clean package
 
-      - name: Filter vulnerabilities by policy
-        id: filter-vulns
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
-        run: |
-          set +e  # Don't exit on error
-          echo "=== Filtering vulnerabilities by policy ==="
-          
-          # Validate JSON and get count
-          VULN_COUNT=$(jq '. | length' /tmp/vulnerable-changes.json 2>/dev/null || echo "0")
-          
-          if [ "$VULN_COUNT" = "0" ] || [ "$VULN_COUNT" = "null" ]; then
-            echo "No vulnerabilities detected or invalid JSON"
-            echo '{\"filtered_vulnerabilities\":[],\"metrics\":{},\"summary\":{\"total_vulnerabilities\":0,\"policy_violations\":0,\"min_severity\":\"critical\"}}' > /tmp/filter-output.json
-            echo "has_violations=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          echo "Input vulnerabilities count: $VULN_COUNT"
-          
-          # Set environment variables for filter script from policy configuration
-          export VULNERABLE_CHANGES=$(cat /tmp/vulnerable-changes.json)
-          export POLICY_SOURCE=${{ steps.policy-config.outputs.policy_source }}
-          export MIN_SEVERITY=${{ steps.policy-config.outputs.min_severity }}
-          
-          # Additional env vars for GitHub policy source
-          if [ "$POLICY_SOURCE" = "github" ]; then
-            export POLICY_REPO=${{ steps.policy-config.outputs.policy_repo }}
-            export POLICY_REF=${{ steps.policy-config.outputs.policy_ref }}
-            export POLICY_PATH=${{ steps.policy-config.outputs.policy_path }}
-            export GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
-            
-            echo "Using policy source: github"
-            echo "  Policy repository: $POLICY_REPO"
-            echo "  Policy ref: $POLICY_REF"
-            echo "  Policy path: $POLICY_PATH"
-          else
-            echo "Using policy source: local"
-            echo "  Policy path: .github/policies/"
-          fi
-          
-          echo "Min severity: $MIN_SEVERITY"
-          
-          # Run filter script (stdout=JSON to file, stderr=logs to console)
-          # Note: Do NOT use 2>&1 here - we want stderr (logs) to go to console, not to file
-          node .github/scripts/filter-vulnerabilities.js > /tmp/filter-output.json
-          FILTER_EXIT_CODE=$?
-          
-          echo "Filter exit code: $FILTER_EXIT_CODE"
-          echo "Filter script JSON output - first 20 lines:"
-          head -20 /tmp/filter-output.json 2>/dev/null || echo "No output file"
-          
-          # Check if filter output is empty
-          if [ ! -s /tmp/filter-output.json ]; then
-            echo "Error: filter output file not created"
-            echo '{"filtered_vulnerabilities":[],"metrics":{},"summary":{"total_vulnerabilities":0,"policy_violations":0,"min_severity":"critical"}}' > /tmp/filter-output.json
-            echo "has_violations=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Validate JSON
-          if ! jq empty /tmp/filter-output.json 2>/dev/null; then
-            echo "Error: filter output is not valid JSON"
-            echo "Raw output:"
-            cat /tmp/filter-output.json
-            echo '{"filtered_vulnerabilities":[],"metrics":{},"summary":{"total_vulnerabilities":0,"policy_violations":0,"min_severity":"critical"}}' > /tmp/filter-output.json
-            echo "has_violations=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Set outputs based on exit code
-          if [ $FILTER_EXIT_CODE -eq 1 ]; then
-            echo "has_violations=true" >> $GITHUB_OUTPUT
-            echo "Set has_violations=true"
-          else
-            echo "has_violations=false" >> $GITHUB_OUTPUT
-            echo "Set has_violations=false"
-          fi
-          
-          exit 0  # Always succeed
-
-      # Debug steps - commented out to reduce noise, uncomment if needed for troubleshooting
-      # - name: Debug - Check dependencies
-      #   if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+      #  - name: Install project dependencies (npm)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_npm == 'true'
       #   run: |
-      #     echo "=== Check pom.xml Files ==="
-      #     find . -name "pom.xml" -type f
-      #     echo ""
-      #     echo "=== module-service/pom.xml Contents ==="
-      #     cat module-service/pom.xml 2>/dev/null || echo "File not found"
-      #     echo ""
-      #     echo "=== Check log4j Dependency ==="
-      #     grep -r "log4j" --include="*.xml" . || echo "log4j not found"
-      #     echo ""
-      #     echo "=== Dependency Review Output Status ==="
-      #     echo "Outcome: ${{ steps.dep-review.outcome }}"
-      #     echo "Exit code: ${{ steps.dep-review.exit-code }}"
-      #     echo ""
-      #     echo "=== Dependency Review vulnerable-changes Output ==="
-      #     echo "Length: $(echo '${{ steps.dep-review.outputs.vulnerable-changes }}' | wc -c)"
-      #     echo "Content preview (first 500 chars):"
-      #     echo '${{ steps.dep-review.outputs.vulnerable-changes }}' | head -c 500
-      #     echo ""
-      #     echo "Parsed with jq:"
-      #     echo '${{ steps.dep-review.outputs.vulnerable-changes }}' | jq '.' 2>&1 | head -50 || echo "Failed to parse JSON"
-      #     echo ""
-      #     echo "=== Filter Output Status ==="
-      #     echo "Has violations: ${{ steps.filter-vulns.outputs.has_violations }}"
-      #     if [ -f /tmp/filter-output.json ]; then
-      #       echo "Filter output:"
-      #       cat /tmp/filter-output.json | jq '.summary'
-      #       echo ""
-      #       echo "Filter output (full):"
-      #       cat /tmp/filter-output.json | jq '.'
+      #     set -euo pipefail
+
+      #     NPM_DIRS="${{ steps.detect-ecosystem.outputs.npm_dirs }}"
+      #     if [ -z "$NPM_DIRS" ]; then
+      #       echo "No npm directories detected (unexpected)."
+      #       exit 0
       #     fi
-      #
-      # - name: Debug - PR comment conditions
-      #   if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true'
+
+      #     while IFS= read -r dir; do
+      #       [ -z "$dir" ] && continue
+      #       echo "[npm] Installing dependencies in ${dir}"
+      #       (cd "$dir" && npm ci)
+      #     done <<< "$NPM_DIRS"
+
+      # - name: Install project dependencies (Yarn)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_yarn == 'true'
       #   run: |
-      #     echo "=== PR Comment Conditions Debug ==="
-      #     echo "is_pr: ${{ steps.context-check.outputs.is_pr }}"
-      #     echo "ignored: ${{ steps.check-ignored.outputs.ignored }}"
-      #     echo "has_violations: ${{ steps.filter-vulns.outputs.has_violations }}"
-      #     echo "filter-vulns outcome: ${{ steps.filter-vulns.outcome }}"
-      #     echo "filter-vulns conclusion: ${{ steps.filter-vulns.conclusion }}"
-      #     echo ""
-      #     echo "Will post violation comment: ${{ steps.filter-vulns.outputs.has_violations == 'true' }}"
-      #     echo "Will post no violation comment: ${{ steps.filter-vulns.outputs.has_violations == 'false' || steps.filter-vulns.outputs.has_violations == '' }}"
+      #     corepack enable
+      #     yarn install --frozen-lockfile
 
-      # WEBHOOK_HOOK: Notification when vulnerabilities are detected
-      - name: Webhook - Vulnerabilities Detected
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.filter-vulns.outputs.has_violations == 'true'
+      # - name: Install project dependencies (pnpm)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_pnpm == 'true'
+      #   run: |
+      #     corepack enable
+      #     pnpm install --frozen-lockfile
+
+      # - name: Install project dependencies (pip)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_pip == 'true'
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     python -m pip install -r requirements.txt -t build/python-deps
+
+      # - name: Install project dependencies (Poetry)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_poetry == 'true'
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     python -m pip install poetry
+      #     poetry install --no-interaction --no-root
+
+      # - name: Build project artifacts (Go)
+      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_go == 'true'
+      #   run: |
+      #     go mod download
+      #     go build ./...
+
+      - name: Detect dependency payload directories
+        id: syft-targets
+        if: steps.check-ignored.outputs.ignored != 'true'
         run: |
-          echo "=== WEBHOOK: Vulnerabilities Detected ==="
-          echo "PR Number: ${{ steps.context-check.outputs.pr_number }}"
-          echo "Violations Count: $(cat /tmp/filter-output.json | jq '.summary.policy_violations')"
-          echo "Min Severity: ${{ steps.policy-config.outputs.min_severity }}"
-          # TODO: Replace with actual webhook call
-          # curl -X POST "$WEBHOOK_URL" \
-          #   -H "Content-Type: application/json" \
-          #   -d '{
-          #     "event": "vulnerabilities_detected",
-          #     "pr_number": "${{ steps.context-check.outputs.pr_number }}",
-          #     "violations": $(cat /tmp/filter-output.json | jq '.summary.policy_violations'),
-          #     "severity": "${{ steps.policy-config.outputs.min_severity }}"
-          #   }'
+          set -euo pipefail
 
-      # WEBHOOK_HOOK: Notification when no vulnerabilities are detected
-      - name: Webhook - No Vulnerabilities
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && (steps.filter-vulns.outputs.has_violations == 'false' || steps.filter-vulns.outputs.has_violations == '')
+          declare -a TARGETS=()
+
+          add_if_exists() {
+            local path="$1"
+            if [ -d "$path" ]; then
+              TARGETS+=("$path")
+            fi
+          }
+
+          HINTS="${{ steps.detect-ecosystem.outputs.artifact_hints }}"
+          if [ -n "$HINTS" ]; then
+            IFS=',' read -r -a HINT_ARRAY <<< "$HINTS"
+            for hint in "${HINT_ARRAY[@]}"; do
+              [ -n "$hint" ] && add_if_exists "$hint"
+            done
+          fi
+
+          add_if_exists "build/install"
+          add_if_exists "build/libs"
+          add_if_exists "build/distributions"
+          add_if_exists "build"
+          add_if_exists "target"
+          add_if_exists "node_modules"
+          add_if_exists "dist"
+          add_if_exists "lib"
+          add_if_exists "vendor"
+          add_if_exists ".venv"
+          add_if_exists "venv"
+          add_if_exists "env"
+
+          if [ ${#TARGETS[@]} -eq 0 ]; then
+            TARGETS+=(".")
+          fi
+
+          PRIMARY="${TARGETS[0]}"
+          echo "[syft] Targets: ${TARGETS[*]}"
+          echo "primary=$PRIMARY" >> "$GITHUB_OUTPUT"
+          echo "targets=$(IFS=','; echo "${TARGETS[*]}")" >> "$GITHUB_OUTPUT"
+
+      # ============================================
+      # Install tools (Syft + Grype)
+      # ============================================
+      - name: Install Syft
+        if: steps.check-ignored.outputs.ignored != 'true'
         run: |
-          echo "=== WEBHOOK: No Vulnerabilities ==="
-          echo "PR Number: ${{ steps.context-check.outputs.pr_number }}"
-          echo "Status: PASSED"
-          echo "Min Severity: ${{ steps.policy-config.outputs.min_severity }}"
-          # TODO: Replace with actual webhook call
-          # curl -X POST "$WEBHOOK_URL" \
-          #   -H "Content-Type: application/json" \
-          #   -d '{
-          #     "event": "no_vulnerabilities",
-          #     "pr_number": "${{ steps.context-check.outputs.pr_number }}",
-          #     "status": "PASSED",
-          #     "severity": "${{ steps.policy-config.outputs.min_severity }}"
-          #   }'
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: Post filtered vulnerability comment
-        id: post-filtered-comment
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && steps.filter-vulns.outputs.has_violations == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
-            
-            // Read filtered output
-            let filterOutput;
-            try {
-              const filterData = fs.readFileSync('/tmp/filter-output.json', 'utf-8');
-              filterOutput = JSON.parse(filterData);
-            } catch (error) {
-              console.error('Failed to read filter output:', error);
-              return;
+      - name: Install Grype
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      # ============================================
+      # Load policy package allowlist
+      # ============================================
+      - name: Load policy allowlist
+        id: policy-allowlist
+        if: steps.check-ignored.outputs.ignored != 'true'
+        env:
+          POLICY_SOURCE: ${{ steps.policy-config.outputs.policy_source }}
+          POLICY_REPO: ${{ steps.policy-config.outputs.policy_repo }}
+          POLICY_REF: ${{ steps.policy-config.outputs.policy_ref }}
+          POLICY_PATH: ${{ steps.policy-config.outputs.policy_path }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          ALLOWLIST_FILE="/tmp/policy-allowlist.txt"
+          : > "$ALLOWLIST_FILE"
+
+          ECOSYSTEMS=("maven" "java-archive" "gradle" "npm" "yarn" "pnpm" "pip" "python" "poetry" "go" "gomod" "cargo" "composer" "nuget" "rubygems")
+
+          fetch_remote_file() {
+            local url="$1"
+            if curl -fsSL -H "Authorization: token ${GITHUB_TOKEN}" "$url" >> "$ALLOWLIST_FILE"; then
+              echo "" >> "$ALLOWLIST_FILE"
+              return 0
+            fi
+            return 1
+          }
+
+          fetch_local_file() {
+            local file="$1"
+            if [ -f "$file" ]; then
+              cat "$file" >> "$ALLOWLIST_FILE"
+              echo "" >> "$ALLOWLIST_FILE"
+              return 0
+            fi
+            return 1
+          }
+
+          case "${POLICY_SOURCE}" in
+            github)
+              if [ -z "$POLICY_REPO" ]; then
+                echo "Policy source is GitHub but policy_repo is empty; skipping allowlist fetch."
+              else
+                for ecosystem in "${ECOSYSTEMS[@]}"; do
+                  URL="https://raw.githubusercontent.com/${POLICY_REPO}/${POLICY_REF}/${POLICY_PATH}/${ecosystem}.txt"
+                  echo "Attempting to fetch policy allowlist from $URL"
+                  fetch_remote_file "$URL" || echo "No allowlist found for ${ecosystem} at ${URL}"
+                done
+              fi
+              ;;
+            *)
+              for ecosystem in "${ECOSYSTEMS[@]}"; do
+                FILE_PATH="${POLICY_PATH%/}/${ecosystem}.txt"
+                echo "Attempting to read local policy allowlist from $FILE_PATH"
+                fetch_local_file "$FILE_PATH" || echo "No allowlist found for ${ecosystem} at ${FILE_PATH}"
+              done
+              ;;
+          esac
+
+          # Normalize entries (remove duplicates, CRLF, comments, empty lines)
+          if [ -s "$ALLOWLIST_FILE" ]; then
+            tr -d '\r' < "$ALLOWLIST_FILE" \
+              | grep -v '^[[:space:]]*#' \
+              | awk '{$1=$1; print}' \
+              | awk 'NF {print $0}' \
+              | sort -u > /tmp/policy-allowlist-clean.txt
+            mv /tmp/policy-allowlist-clean.txt "$ALLOWLIST_FILE"
+          fi
+
+          ALLOW_COUNT=$(wc -l < "$ALLOWLIST_FILE" | tr -d ' ')
+
+          echo "Allowlist entries: $ALLOW_COUNT"
+          echo "list_file=$ALLOWLIST_FILE" >> $GITHUB_OUTPUT
+          echo "entry_count=$ALLOW_COUNT" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # Generate SBOM
+      # ============================================
+      - name: Generate SBOM (CycloneDX)
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          PRIMARY="${{ steps.syft-targets.outputs.primary }}"
+          if [ -z "$PRIMARY" ]; then
+            PRIMARY="."
+          fi
+
+          echo "[syft] Generating SBOM from $PRIMARY"
+          syft . -o cyclonedx-json > sbom.json
+
+          syft . -o syft-table > table.txt
+          cat table.txt
+
+      # ============================================
+      # Run Grype scan
+      # ============================================
+      - name: Scan SBOM with Grype
+        id: grype
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          grype db update || true
+          grype sbom:sbom.json -o json > grype.json
+
+          CRIT=$(jq '[.matches[].vulnerability.severity | select(.=="Critical")] | length' grype.json)
+          HIGH=$(jq '[.matches[].vulnerability.severity | select(.=="High")] | length' grype.json)
+
+          echo "critical=$CRIT" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # Transform Grype results -> GitHub dependency-review-style JSON
+      # ============================================
+      - name: Build GH-style vulnerable-changes JSON
+        id: vulnjson
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          jq '
+            def safe_group:
+              (
+                .artifact.metadata.pomProperties? //
+                .artifact.metadata.pom_properties? //
+                .artifact.metadata.maven? //
+                {}
+              ) as $meta |
+              (
+                $meta.groupId // $meta.groupID // $meta.group // ""
+              );
+
+            def package_id:
+              (safe_group) as $group |
+              if ($group | length) > 0 then
+                "\($group):\(.artifact.name)"
+              else
+                .artifact.name
+              end;
+
+            {
+              vulnerable_changes: [
+                .matches[] |
+                {
+                  package:       .artifact.name,
+                  group:         safe_group,
+                  package_id:    package_id,
+                  version:       .artifact.version,
+                  ecosystem:     .artifact.type,
+                  vuln_id:       .vulnerability.id,
+                  severity:      .vulnerability.severity,
+                  fixed_in: (
+                      .vulnerability.fixed_in //
+                      .vulnerability.metadata.patched_versions //
+                      .vulnerability.metadata.fix_versions //
+                      "(none)"
+                  )
+                }
+              ]
             }
-            
-            // Get PR details
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: parseInt(prNumber)
-            });
-            
-            // Build comment
-            const summaryUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            let comment = `## 🔒 Dependency Security Check (Policy Filtered)\n\n`;
-            comment += `⚠️ **Detected ${filterOutput.summary.min_severity} level vulnerabilities in policy-required packages**\n\n`;
-            comment += `**Commit**: \`${pr.head.sha.substring(0, 7)}\`\n\n`;
-            comment += `**Statistics**:\n`;
-            comment += `- Total Vulnerabilities: ${filterOutput.summary.total_vulnerabilities}\n`;
-            comment += `- Policy Violations: ${filterOutput.summary.policy_violations}\n`;
-            comment += `- Minimum Severity: ${filterOutput.summary.min_severity}\n`;
-            comment += `- Build Failure Threshold: ${{ steps.policy-config.outputs.fail_on_severity }}\n\n`;
-            
-            comment += `### 📋 Policy Violation Details\n\n`;
-            
-            // Single merged table
-            comment += `| Package Name | Ecosystem | Current Version | Vulnerabilities | Vulnerability List |\n`;
-            comment += `|--------------|-----------|-----------------|-----------------|-------------------|\n`;
-            
-            // Table rows
-            for (const vuln of filterOutput.filtered_vulnerabilities) {
-              const metrics = filterOutput.metrics[vuln.name];
-              
-              // Build vulnerability list for this package
-              let vulnList = '';
-              if (vuln.vulnerabilities && vuln.vulnerabilities.length > 0) {
-                vulnList = vuln.vulnerabilities.map(v => {
-                  const emoji = v.severity === 'critical' ? '🔴' : 
-                               v.severity === 'high' ? '🟠' : 
-                               v.severity === 'moderate' ? '🟡' : '⚪';
-                  const id = v.advisory_ghsa_id || v.advisory_cve_id || 'N/A';
-                  return `${emoji} ${v.severity} ${id}`;
-                }).join('<br>');
-              }
-              
-              comment += `| \`${vuln.name}\` | ${vuln.ecosystem} | \`${vuln.version}\` | ${metrics.vulnerability_count} | ${vulnList} |\n`;
-            }
-            
-            comment += `\n`;
-            
-            comment += `<a href="${summaryUrl}" target="_blank" rel="noopener noreferrer">📊 View Complete Dependency Security Check Report</a>\n\n`;
-            comment += `**Tip**: These packages are flagged in the upstream policy for attention. To ignore this check, add the \`dependency-check-ignore\` label to the PR.\n\n`;
-            comment += `---\n`;
-            comment += `*This comment was automatically generated by GitHub Actions (Policy Filtered Version)*\n`;
-            
-            // Post comment
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: parseInt(prNumber),
-              body: comment
-            });
-            
-            console.log('Created policy-filtered vulnerability comment');
+          ' grype.json > vuln-changes.json
 
-      - name: Post no violations comment
-        if: steps.context-check.outputs.is_pr == 'true' && steps.check-ignored.outputs.ignored != 'true' && (steps.filter-vulns.outputs.has_violations == 'false' || steps.filter-vulns.outputs.has_violations == '')
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const prNumber = '${{ steps.context-check.outputs.pr_number }}';
-            
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: parseInt(prNumber)
-            });
-            
-            const summaryUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            let comment = `## 🔒 Dependency Security Check (Policy Filtered)\n\n`;
-            comment += `✅ **No ${{ steps.policy-config.outputs.min_severity }} level vulnerabilities detected in policy-required packages**\n\n`;
-            comment += `**Commit**: \`${pr.head.sha.substring(0, 7)}\`\n\n`;
-            comment += `**Configuration**: Minimum Severity = ${{ steps.policy-config.outputs.min_severity }}, Build Failure Threshold = ${{ steps.policy-config.outputs.fail_on_severity }}\n\n`;
-            comment += `<a href="${summaryUrl}" target="_blank" rel="noopener noreferrer">📊 View Complete Dependency Security Check Report</a>\n\n`;
-            comment += `---\n`;
-            comment += `*This comment was automatically generated by GitHub Actions (Policy Filtered Version)*\n`;
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: parseInt(prNumber),
-              body: comment
-            });
-            
-            console.log('Created "no policy violations detected" comment');
+          echo "file=vuln-changes.json" >> $GITHUB_OUTPUT
 
-      - name: Fail if vulnerabilities found
-        if: steps.dep-review.outcome == 'failure'
+      # ============================================
+      # Build full vulnerability markdown report (pre-filter)
+      # ============================================
+      - name: Build full vulnerability report
+        id: full-report
+        if: steps.check-ignored.outputs.ignored != 'true'
         run: |
-          echo "Security vulnerabilities found, please check the detailed report in PR comments"
-          exit 1
+          FULL_REPORT_FILE="/tmp/sbom-vulnerabilities-full.md"
+          REPORT_PATH=$(python3 .github/scripts/grype_vuln_to_md.py --input vuln-changes.json --output "$FULL_REPORT_FILE")
+          echo "path=$REPORT_PATH" >> $GITHUB_OUTPUT
+
+      - name: Publish full vulnerability summary
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          if [ -f "${{ steps.full-report.outputs.path }}" ]; then
+            {
+              echo "## 🔎 全量漏洞列表"
+              echo ""
+              cat "${{ steps.full-report.outputs.path }}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Full report not found at ${{ steps.full-report.outputs.path }}"
+          fi
+
+      # ============================================
+      # Filter vulnerabilities by policy allowlist
+      # ============================================
+      - name: Filter vulnerabilities by policy
+        id: policy-filter
+        if: steps.check-ignored.outputs.ignored != 'true'
+        env:
+          ALLOW_FILE: ${{ steps.policy-allowlist.outputs.list_file }}
+          MIN_SEVERITY: ${{ steps.policy-config.outputs.min_severity }}
+          FILTER_DEBUG: "true"
+        run: |
+          set -euo pipefail
+
+          SOURCE_FILE="vuln-changes.json"
+          TARGET_FILE="vuln-changes-filtered.json"
+
+          echo "Filtering vulnerabilities (allowlist + min severity)."
+          python3 .github/scripts/filter-allowlist.py \
+            --input "$SOURCE_FILE" \
+            --output "$TARGET_FILE" \
+            --min-severity "${MIN_SEVERITY}" \
+            ${ALLOW_FILE:+--allowlist "${ALLOW_FILE}"} \
+            ${FILTER_DEBUG:+--debug} || {
+              echo "Filtering script failed" >&2
+              exit 1
+            }
+
+          FILTERED_COUNT=$(jq '.vulnerable_changes | length' "$TARGET_FILE")
+          echo "Filtered vulnerabilities: $FILTERED_COUNT"
+          echo "file=$TARGET_FILE" >> $GITHUB_OUTPUT
+
+      - name: Convert vulnerable changes to Markdown
+        id: vuln_table
+        if: steps.check-ignored.outputs.ignored != 'true'
+        env:
+          CRITICAL_COUNT: ${{ steps.grype.outputs.critical }}
+          HIGH_COUNT: ${{ steps.grype.outputs.high }}
+        run: |
+          VULN_FILE="${{ steps.policy-filter.outputs.file }}"
+          if [ -z "$VULN_FILE" ]; then
+            VULN_FILE="vuln-changes.json"
+          fi
+
+          MARKDOWN_FILE=$(mktemp "${TMPDIR:-/tmp}/vuln-table-XXXXXX.md")
+          python3 .github/scripts/grype_vuln_to_md.py --input "$VULN_FILE" --output "$MARKDOWN_FILE"
+          COMMENT_FILE=$(mktemp "${TMPDIR:-/tmp}/vuln-comment-XXXXXX.md")
+
+          echo "table_file=$MARKDOWN_FILE" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "table<<EOF"
+            cat "$MARKDOWN_FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## 🔍 SBOM Vulnerability Scan (Syft + Grype)"
+            echo "**Critical:** ${CRITICAL_COUNT:-0}  "
+            echo "**High:** ${HIGH_COUNT:-0}"
+            echo
+          } > "$COMMENT_FILE"
+
+          cat "$MARKDOWN_FILE" >> "$COMMENT_FILE"
+
+          FULL_REPORT_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}?check_suite_focus=true"
+          {
+            echo ""
+            echo "[查看完整漏洞列表](${FULL_REPORT_URL})"
+          } >> "$COMMENT_FILE"
+
+          {
+            echo "body<<EOF"
+            cat "$COMMENT_FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ============================================
+      # PR Comment (summary + table)
+      # ============================================
+      - name: Comment results in PR
+        if: steps.check-ignored.outputs.ignored != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          recreate: true
+          header: "sbom_vuln_scan"
+          message: ${{ steps.vuln_table.outputs.body }}
+
+      # ============================================
+      # Block merge based on policy
+      # ============================================
+      - name: Fail on critical/high
+        if: steps.check-ignored.outputs.ignored != 'true'
+        run: |
+          CRIT=${{ steps.grype.outputs.critical }}
+          HIGH=${{ steps.grype.outputs.high }}
+          FAIL=${{ steps.policy-config.outputs.fail_on_severity }}
+
+          if [ "$CRIT" -gt 0 ]; then
+            echo "Critical vulnerabilities found."
+            exit 1
+          fi
+
+          if [ "$FAIL" = "high" ] && [ "$HIGH" -gt 0 ]; then
+            echo "High vulnerabilities found (policy blocks high)."
+            exit 1
+          fi

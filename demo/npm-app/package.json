@@ -1,0 +1,14 @@
+{
+  "name": "demo-npm-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "lodash": "4.17.19",
+    "event-stream": "3.3.6"
+  }
+}
+

@@ -1,5 +1,0 @@
-org.apache.logging.log4j:log4j-core
-org.apache.commons:commons-lang3
-org.apache.commons:commons-text
-commons-io:commons-io
-com.google.guava:guava
