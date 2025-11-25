@@ -248,9 +248,9 @@ jobs:
       #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'maven'
       #   run: mvn -B clean package
 
-      # - name: Install project dependencies (npm)
-      #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'npm'
-      #   run: npm ci
+      - name: Install project dependencies (npm)
+        if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'npm'
+        run: npm ci
 
       # - name: Install project dependencies (Yarn)
       #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.ecosystem == 'yarn'
