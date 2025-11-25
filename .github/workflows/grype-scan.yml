@@ -1,0 +1,79 @@
+name: Grype Vulnerability Scan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  grype-scan:
+    runs-on: ubuntu-latest
+    env:
+      GRADLE_OPTS: -Dorg.gradle.daemon=false
+      GRYPE_DB_CACHE_DIR: ~/.cache/grype/db
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build project (fetch dependencies)
+        run: ./gradlew --no-daemon clean build
+
+      - name: Prepare Grype cache directory
+        run: mkdir -p ~/.cache/grype/db
+
+      - name: Cache Grype vulnerability database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/grype/db
+          key: grype-db-${{ runner.os }}-v1
+          restore-keys: |
+            grype-db-${{ runner.os }}-
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - name: Run Grype scan
+        id: grype
+        uses: anchore/grype-action@v1
+        with:
+          scan-type: sbom
+          sbom: sbom.cdx.json
+          fail-on-severity: high
+          add-cpes-if-none: true
+          output-format: json
+          output-file: grype-report.json
+
+      - name: Upload SBOM and Grype report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-results
+          path: |
+            sbom.cdx.json
+            grype-report.json
+
+      - name: Summarize Grype results
+        if: always()
+        run: |
+          echo "## Grype 扫描摘要" >> $GITHUB_STEP_SUMMARY
+          echo "- 触发提交：\`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 失败阈值：High 及以上" >> $GITHUB_STEP_SUMMARY
+          echo "- SBOM 文件：\`sbom.cdx.json\`（已作为 artifact 上传）" >> $GITHUB_STEP_SUMMARY
+          echo "- Grype 报告：\`grype-report.json\`（已作为 artifact 上传）" >> $GITHUB_STEP_SUMMARY
