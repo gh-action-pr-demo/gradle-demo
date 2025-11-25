@@ -173,6 +173,22 @@ jobs:
           NEEDS_GO="false"
 
           declare -a HINTS=()
+          declare -a NPM_DIRS=()
+
+          add_unique() {
+            local value="$1"
+            local array_name="$2"
+            local -n ref="$array_name"
+            if [ -z "$value" ]; then
+              return
+            fi
+            for existing in "${ref[@]}"; do
+              if [ "$existing" = "$value" ]; then
+                return
+              fi
+            done
+            ref+=("$value")
+          }
 
           mark_primary() {
             local name="$1"
@@ -183,9 +199,27 @@ jobs:
 
           add_hint() {
             local path="$1"
-            if [ -n "$path" ]; then
-              HINTS+=("$path")
-            fi
+            path="${path%/}"
+            add_unique "$path" HINTS
+          }
+
+          collect_npm_dirs() {
+            local -a found=()
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+              dir=$(dirname "$file")
+              dir="${dir#./}"
+              if [ -z "$dir" ]; then
+                dir="."
+              fi
+              add_unique "$dir" NPM_DIRS
+            done < <(
+              find . -maxdepth 5 -type f \
+                \( -name 'package-lock.json' -o -name 'package.json' \) \
+                ! -path '*/node_modules/*' ! -path '*/.git/*' \
+                ! -path '*/build/*' ! -path '*/dist/*' \
+                2>/dev/null
+            )
           }
 
           if [ -f "gradlew" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
@@ -244,6 +278,20 @@ jobs:
             add_hint "bin"
           fi
 
+          collect_npm_dirs
+
+          if [ ${#NPM_DIRS[@]} -gt 0 ]; then
+            HAS_NPM="true"
+            NEEDS_NODE="true"
+            for dir in "${NPM_DIRS[@]}"; do
+              if [ "$dir" = "." ]; then
+                add_hint "node_modules"
+              else
+                add_hint "${dir}/node_modules"
+              fi
+            done
+          fi
+
           if [ "$PRIMARY" = "unknown" ]; then
             PRIMARY="source"
           fi
@@ -270,6 +318,16 @@ jobs:
             echo "artifact_hint=$ARTIFACT_HINT"
             echo "artifact_hints=$HINTS_JOINED"
           } >> "$GITHUB_OUTPUT"
+
+          if [ ${#NPM_DIRS[@]} -gt 0 ]; then
+            {
+              echo "npm_dirs<<EOF"
+              printf '%s\n' "${NPM_DIRS[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_dirs=" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up JDK
         if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.needs_java == 'true'
@@ -312,7 +370,20 @@ jobs:
 
       - name: Install project dependencies (npm)
         if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_npm == 'true'
-        run: npm ci
+        run: |
+          set -euo pipefail
+
+          NPM_DIRS="${{ steps.detect-ecosystem.outputs.npm_dirs }}"
+          if [ -z "$NPM_DIRS" ]; then
+            echo "No npm directories detected (unexpected)."
+            exit 0
+          fi
+
+          while IFS= read -r dir; do
+            [ -z "$dir" ] && continue
+            echo "[npm] Installing dependencies in ${dir}"
+            (cd "$dir" && npm ci)
+          done <<< "$NPM_DIRS"
 
       # - name: Install project dependencies (Yarn)
       #   if: steps.check-ignored.outputs.ignored != 'true' && steps.detect-ecosystem.outputs.has_yarn == 'true'
