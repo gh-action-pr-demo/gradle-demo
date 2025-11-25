@@ -562,7 +562,10 @@ jobs:
           fi
 
           echo "[syft] Generating SBOM from $PRIMARY"
-          syft "dir:$PRIMARY" -o cyclonedx-json > sbom.json
+          syft . -o cyclonedx-json > sbom.json
+
+          syft . -o syft-table > test.txt
+          cat test.txt
 
       # ============================================
       # Run Grype scan
