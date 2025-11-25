@@ -321,7 +321,7 @@ jobs:
         if: steps.check-ignored.outputs.ignored != 'true'
         run: |
           FULL_REPORT_FILE="/tmp/sbom-vulnerabilities-full.md"
-          REPORT_PATH=$(scripts/grype-vuln-to-md.sh --input vuln-changes.json --output "$FULL_REPORT_FILE")
+          REPORT_PATH=$(python3 .github/scripts/grype_vuln_to_md.py --input vuln-changes.json --output "$FULL_REPORT_FILE")
           echo "path=$REPORT_PATH" >> $GITHUB_OUTPUT
 
       - name: Publish full vulnerability summary
@@ -380,7 +380,8 @@ jobs:
             VULN_FILE="vuln-changes.json"
           fi
 
-          MARKDOWN_FILE=$(scripts/grype-vuln-to-md.sh --input "$VULN_FILE")
+          MD_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/vuln-table-XXXXXX.md")
+          MARKDOWN_FILE=$(python3 .github/scripts/grype_vuln_to_md.py --input "$VULN_FILE" --output "$MD_OUTPUT" && echo "$MD_OUTPUT")
           COMMENT_FILE=$(mktemp "${TMPDIR:-/tmp}/vuln-comment-XXXXXX.md")
 
           echo "table_file=$MARKDOWN_FILE" >> "$GITHUB_OUTPUT"
